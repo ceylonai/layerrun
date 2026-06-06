@@ -3,4 +3,6 @@ name = "layerrun-cli"
 version = "0.1.0"
 edition = "2024"
 
+
 [dependencies]
+layerrun-core={path="../layerrun-core"}

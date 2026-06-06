@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "layerrun-cli"
 version = "0.1.0"
+dependencies = [
+ "layerrun-core",
+]
 
 [[package]]
 name = "layerrun-core"
@@ -13,3 +16,6 @@ version = "0.1.0"
 [[package]]
 name = "layerrun-server"
 version = "0.1.0"
+dependencies = [
+ "layerrun-core",
+]
