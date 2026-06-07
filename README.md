@@ -13,6 +13,7 @@ The workspace contains:
 - Rust toolchain with Cargo.
 - Local model files, or network access to Hugging Face for `--hf-repo` commands.
 - `HF_TOKEN` or `--hf-token` for gated/private Hugging Face repositories.
+- Optional MLX backend: Apple Silicon macOS with the `mlx` Cargo feature enabled, `cmake`, and full Xcode selected so `xcrun -find metal` succeeds.
 
 ## Workspace Commands
 
@@ -32,6 +33,19 @@ Run the CLI help:
 
 ```sh
 cargo run -p layerrun-cli -- --help
+```
+
+Build the CLI with the optional MLX backend:
+
+```sh
+cargo build -p layerrun-cli --features mlx
+```
+
+The current `mlx-rs` native build requires the Metal shader compiler even when only the top-level MLX feature is selected. Command Line Tools alone are not enough; install full Xcode and select it with `xcode-select`.
+
+```sh
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+xcrun -find metal
 ```
 
 Run the server stub:
@@ -131,6 +145,24 @@ cargo run -p layerrun-cli -- generate \
   --max-new-tokens 8
 ```
 
+Select a backend explicitly:
+
+```sh
+cargo run -p layerrun-cli -- generate \
+  --model-dir models/qwen \
+  --prompt "Write a short greeting" \
+  --backend cpu
+```
+
+Use MLX when the CLI was built with `--features mlx`:
+
+```sh
+cargo run -p layerrun-cli --features mlx -- generate \
+  --model-dir models/qwen \
+  --prompt "Write a short greeting" \
+  --backend mlx
+```
+
 Generate with debug output:
 
 ```sh
@@ -160,6 +192,7 @@ Options:
 - `--prompt <PROMPT>`: prompt text.
 - `--max-new-tokens <MAX_NEW_TOKENS>`: number of new tokens to generate. Defaults to `8`.
 - `--debug`: print additional model execution details.
+- `--backend <BACKEND>`: runtime backend, either `cpu` or `mlx`. Defaults to `cpu`.
 
 ## optimize
 
@@ -241,6 +274,7 @@ Options:
 - `--debug`: print additional model execution details.
 - `--preload-layers`: load all per-layer weights before generation.
 - `--preload-layer-count <N>`: load only the first `N` per-layer weights before generation. Cannot be combined with `--preload-layers`.
+- `--backend <BACKEND>`: runtime backend, either `cpu` or `mlx`. Defaults to `cpu`.
 
 ## Hugging Face Cache
 

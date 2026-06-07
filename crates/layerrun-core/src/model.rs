@@ -1,12 +1,9 @@
 use crate::{
+    backend::{Backend, BackendKind, BackendOps},
     config::ModelConfig,
     kv_cache::KvCache,
     layer_store::LayerStore,
-    ops::{
-        add_vec, apply_llama_rope_all_heads, apply_rope_all_heads, argmax, embed_token,
-        gelu_pytorch_tanh_vec, linear_out_in, mul_vec, rms_norm, rms_norm_no_weight, silu_vec,
-        softcap_vec, softmax,
-    },
+    ops::{apply_llama_rope_all_heads, apply_rope_all_heads, argmax, embed_token, softcap_vec},
     safetensor_loader::SafeTensorSource,
     tensor::Tensor,
     weights::DecoderLayerWeights,
@@ -16,6 +13,7 @@ use std::{path::Path, time::Instant};
 
 pub struct RawLlm {
     pub config: ModelConfig,
+    backend: Backend,
     pub layer_store: Option<LayerStore>,
     safetensor_source: Option<SafeTensorSource>,
     preloaded_layers: Vec<Option<DecoderLayerWeights>>,
@@ -53,6 +51,7 @@ impl RawLlm {
 
         Ok(Self {
             config,
+            backend: Backend::new(BackendKind::default())?,
             layer_store: None,
             safetensor_source: Some(safetensor_source),
             preloaded_layers: Vec::new(),
@@ -76,6 +75,7 @@ impl RawLlm {
 
         Ok(Self {
             config,
+            backend: Backend::new(BackendKind::default())?,
             layer_store: Some(layer_store),
             safetensor_source: None,
             preloaded_layers: Vec::new(),
@@ -84,6 +84,15 @@ impl RawLlm {
             final_norm,
             lm_head,
         })
+    }
+
+    pub fn with_backend(mut self, backend: BackendKind) -> Result<Self> {
+        self.backend = Backend::new(backend)?;
+        Ok(self)
+    }
+
+    pub fn backend(&self) -> BackendKind {
+        self.backend.kind()
     }
 
     pub fn preload_layers_with_debug(&mut self, debug: bool) -> Result<()> {
@@ -184,6 +193,7 @@ impl RawLlm {
                     layer_id,
                     per_layer_inputs.as_deref(),
                     &mut layer_caches[layer_id],
+                    &self.backend,
                 )?;
                 let run_elapsed = run_started.elapsed();
 
@@ -208,6 +218,7 @@ impl RawLlm {
                     layer_id,
                     per_layer_inputs.as_deref(),
                     &mut layer_caches[layer_id],
+                    &self.backend,
                 )?;
                 let run_elapsed = run_started.elapsed();
 
@@ -226,9 +237,9 @@ impl RawLlm {
             // This is the layer-by-layer paging point.
         }
 
-        hidden = model_rms_norm(&hidden, &self.final_norm, &self.config)?;
+        hidden = model_rms_norm(&hidden, &self.final_norm, &self.config, &self.backend)?;
 
-        let mut logits = linear_out_in(&hidden, &self.lm_head, None)?;
+        let mut logits = self.backend.linear_out_in(&hidden, &self.lm_head, None)?;
         if let Some(cap) = self.config.final_logit_softcapping {
             softcap_vec(&mut logits, cap);
         }
@@ -370,36 +381,37 @@ pub fn decoder_layer_forward(
     layer_id: usize,
     per_layer_inputs: Option<&[f32]>,
     cache: &mut KvCache,
+    backend: &dyn BackendOps,
 ) -> Result<Vec<f32>> {
-    let normed = model_rms_norm(hidden, &weights.input_layernorm, cfg)?;
+    let normed = model_rms_norm(hidden, &weights.input_layernorm, cfg, backend)?;
 
-    let attn = attention_forward(&normed, weights, cfg, layer_id, cache)?;
+    let attn = attention_forward(&normed, weights, cfg, layer_id, cache, backend)?;
 
     let uses_post_residual_norms =
         weights.pre_feedforward_layernorm.is_some() || weights.post_feedforward_layernorm.is_some();
 
     let attn = if uses_post_residual_norms {
-        model_rms_norm(&attn, &weights.post_attention_layernorm, cfg)?
+        model_rms_norm(&attn, &weights.post_attention_layernorm, cfg, backend)?
     } else {
         attn
     };
 
-    let hidden = add_vec(hidden, &attn)?;
+    let hidden = backend.add_vec(hidden, &attn)?;
 
     let normed = if let Some(norm) = &weights.pre_feedforward_layernorm {
-        model_rms_norm(&hidden, norm, cfg)?
+        model_rms_norm(&hidden, norm, cfg, backend)?
     } else {
-        model_rms_norm(&hidden, &weights.post_attention_layernorm, cfg)?
+        model_rms_norm(&hidden, &weights.post_attention_layernorm, cfg, backend)?
     };
 
-    let mlp = mlp_forward(&normed, weights, cfg)?;
+    let mlp = mlp_forward(&normed, weights, cfg, backend)?;
     let mlp = if let Some(norm) = &weights.post_feedforward_layernorm {
-        model_rms_norm(&mlp, norm, cfg)?
+        model_rms_norm(&mlp, norm, cfg, backend)?
     } else {
         mlp
     };
 
-    let mut hidden = add_vec(&hidden, &mlp)?;
+    let mut hidden = backend.add_vec(&hidden, &mlp)?;
 
     if let (
         Some(per_layer_input_gate),
@@ -419,16 +431,16 @@ pub fn decoder_layer_forward(
 
         if end <= per_layer_inputs.len() {
             let residual = hidden.clone();
-            let gate = linear_out_in(&hidden, per_layer_input_gate, None)?;
+            let gate = backend.linear_out_in(&hidden, per_layer_input_gate, None)?;
             let gate = if cfg.use_gelu_mlp() {
-                gelu_pytorch_tanh_vec(&gate)
+                backend.gelu_pytorch_tanh_vec(&gate)
             } else {
-                silu_vec(&gate)
+                backend.silu_vec(&gate)
             };
-            let mixed = mul_vec(&gate, &per_layer_inputs[start..end])?;
-            let projected = linear_out_in(&mixed, per_layer_projection, None)?;
-            let projected = model_rms_norm(&projected, post_per_layer_input_norm, cfg)?;
-            hidden = add_vec(&residual, &projected)?;
+            let mixed = backend.mul_vec(&gate, &per_layer_inputs[start..end])?;
+            let projected = backend.linear_out_in(&mixed, per_layer_projection, None)?;
+            let projected = model_rms_norm(&projected, post_per_layer_input_norm, cfg, backend)?;
+            hidden = backend.add_vec(&residual, &projected)?;
         }
     }
 
@@ -444,21 +456,26 @@ pub fn decoder_layer_forward(
     Ok(hidden)
 }
 
-pub fn mlp_forward(x: &[f32], w: &DecoderLayerWeights, cfg: &ModelConfig) -> Result<Vec<f32>> {
-    let gate = linear_out_in(x, &w.gate_proj, w.gate_proj_bias.as_ref())?;
-    let up = linear_out_in(x, &w.up_proj, w.up_proj_bias.as_ref())?;
+pub fn mlp_forward(
+    x: &[f32],
+    w: &DecoderLayerWeights,
+    cfg: &ModelConfig,
+    backend: &dyn BackendOps,
+) -> Result<Vec<f32>> {
+    let gate = backend.linear_out_in(x, &w.gate_proj, w.gate_proj_bias.as_ref())?;
+    let up = backend.linear_out_in(x, &w.up_proj, w.up_proj_bias.as_ref())?;
 
     if gate.len() != up.len() {
         anyhow::bail!("MLP gate/up mismatch: gate {}, up {}", gate.len(), up.len());
     }
 
     let gate_act = if cfg.use_gelu_mlp() {
-        gelu_pytorch_tanh_vec(&gate)
+        backend.gelu_pytorch_tanh_vec(&gate)
     } else {
-        silu_vec(&gate)
+        backend.silu_vec(&gate)
     };
-    let mixed = mul_vec(&gate_act, &up)?;
-    let out = linear_out_in(&mixed, &w.down_proj, w.down_proj_bias.as_ref())?;
+    let mixed = backend.mul_vec(&gate_act, &up)?;
+    let out = backend.linear_out_in(&mixed, &w.down_proj, w.down_proj_bias.as_ref())?;
 
     if out.len() != cfg.hidden_size {
         anyhow::bail!(
@@ -477,10 +494,11 @@ pub fn attention_forward(
     cfg: &ModelConfig,
     layer_id: usize,
     cache: &mut KvCache,
+    backend: &dyn BackendOps,
 ) -> Result<Vec<f32>> {
-    let mut q = linear_out_in(x, &w.q_proj, w.q_proj_bias.as_ref())?;
-    let mut k = linear_out_in(x, &w.k_proj, w.k_proj_bias.as_ref())?;
-    let mut v = linear_out_in(x, &w.v_proj, w.v_proj_bias.as_ref())?;
+    let mut q = backend.linear_out_in(x, &w.q_proj, w.q_proj_bias.as_ref())?;
+    let mut k = backend.linear_out_in(x, &w.k_proj, w.k_proj_bias.as_ref())?;
+    let mut v = backend.linear_out_in(x, &w.v_proj, w.v_proj_bias.as_ref())?;
 
     let num_q_heads = cfg.num_attention_heads;
     let num_kv_heads = cfg.layer_kv_heads(layer_id);
@@ -510,7 +528,7 @@ pub fn attention_forward(
             let start = h * q_head_dim;
             let end = start + q_head_dim;
 
-            let normed = model_rms_norm(&q[start..end], q_norm, cfg)?;
+            let normed = model_rms_norm(&q[start..end], q_norm, cfg, backend)?;
 
             q_normed[start..end].copy_from_slice(&normed);
         }
@@ -525,7 +543,7 @@ pub fn attention_forward(
             let start = h * kv_head_dim;
             let end = start + kv_head_dim;
 
-            let normed = model_rms_norm(&k[start..end], k_norm, cfg)?;
+            let normed = model_rms_norm(&k[start..end], k_norm, cfg, backend)?;
 
             k_normed[start..end].copy_from_slice(&normed);
         }
@@ -540,7 +558,7 @@ pub fn attention_forward(
             let start = h * kv_head_dim;
             let end = start + kv_head_dim;
 
-            let normed = rms_norm_no_weight(&v[start..end], cfg.rms_norm_eps());
+            let normed = backend.rms_norm_no_weight(&v[start..end], cfg.rms_norm_eps());
 
             v_normed[start..end].copy_from_slice(&normed);
         }
@@ -611,7 +629,7 @@ pub fn attention_forward(
             scores.push(dot / (head_dim as f32).sqrt());
         }
 
-        let probs = softmax(&scores);
+        let probs = backend.softmax(&scores);
         let mut head_out = vec![0.0f32; head_dim];
 
         for (offset, p) in probs.iter().enumerate() {
@@ -631,13 +649,18 @@ pub fn attention_forward(
     }
 
     // o_proj must return hidden_size.
-    let out = linear_out_in(&context, &w.o_proj, w.o_proj_bias.as_ref())?;
+    let out = backend.linear_out_in(&context, &w.o_proj, w.o_proj_bias.as_ref())?;
 
     Ok(out)
 }
 
-fn model_rms_norm(x: &[f32], weight: &Tensor, cfg: &ModelConfig) -> Result<Vec<f32>> {
-    rms_norm(x, weight, cfg.rms_norm_eps())
+fn model_rms_norm(
+    x: &[f32],
+    weight: &Tensor,
+    cfg: &ModelConfig,
+    backend: &dyn BackendOps,
+) -> Result<Vec<f32>> {
+    backend.rms_norm(x, weight, cfg.rms_norm_eps())
 }
 
 fn load_embeddings_per_layer_from_source(

@@ -3,6 +3,9 @@ name = "layerrun-cli"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+mlx = ["layerrun-core/mlx"]
 
 [dependencies]
 anyhow = "1.0.102"

@@ -68,6 +68,18 @@ It also handles alternate tensor prefixes such as `model.language_model.*`, whic
 
 The runtime accesses tensor values through helpers like `value`, `row_f32`, and `dot_row`. This keeps model code simple, but it also means some formats are dequantized or converted during scalar access. That design favors correctness and compatibility over maximum speed.
 
+### `layerrun-core::backend`
+
+This module defines the runtime backend boundary. `BackendOps` covers the math operations used by model execution:
+
+- linear projection
+- RMSNorm
+- elementwise add/multiply
+- SiLU and GELU activation
+- softmax
+
+`CpuBackend` is the default backend and delegates to the existing `ops` kernels. `MlxBackend` is available behind the `mlx` Cargo feature and is selected from the CLI with `--backend mlx`. If the feature is not enabled, requesting MLX fails during model setup instead of falling back silently.
+
 ### `layerrun-core::weights`
 
 `DecoderLayerWeights` is the per-layer weight bundle used by the forward pass. It loads:
@@ -85,6 +97,7 @@ This module validates expected tensor shapes from `ModelConfig`. It also detects
 `RawLlm` is the runtime boundary. It owns:
 
 - `ModelConfig`
+- selected runtime backend
 - embedding tensors
 - final norm
 - LM head
@@ -136,7 +149,7 @@ argmax next token
 
 ### `layerrun-core::ops`
 
-This module contains the math kernels used by the runtime:
+This module contains the CPU math kernels used by the default backend:
 
 - matvec and linear projection
 - RMSNorm
@@ -237,12 +250,13 @@ The highest-impact future improvements are:
 - precomputed RoPE sin/cos tables
 - flatter KV cache storage to improve locality
 - optional memory budget controls for partial layer preloading
+- fuller MLX kernels under the backend boundary
 
 ## Current Limitations
 
 - Generation is greedy only.
 - Prompt prefill is token-by-token.
-- No GPU backend is present.
+- MLX backend selection is feature-gated and currently shares the CPU operation semantics while the backend boundary is being expanded.
 - Some checkpoint formats are explicitly rejected, including GPTQ-style `qweight` tensors.
 - Qwen linear-attention checkpoints are detected but not implemented.
 - The server crate is currently a stub.

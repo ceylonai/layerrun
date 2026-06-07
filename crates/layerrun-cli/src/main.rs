@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use layerrun_core::backend::BackendKind;
 use layerrun_core::config::ModelConfig;
 use layerrun_core::huggingface::HuggingFaceSource;
 use layerrun_core::model::RawLlm;
@@ -93,6 +94,10 @@ enum Commands {
 
         #[arg(long)]
         debug: bool,
+
+        /// Runtime backend to use for generation.
+        #[arg(long, default_value_t = BackendKind::Cpu)]
+        backend: BackendKind,
     },
 
     /// Create a LayerRun directory with embeddings, per-layer files, and final weights.
@@ -144,6 +149,10 @@ enum Commands {
         /// Preload the first N per-layer weight files before generation.
         #[arg(long, conflicts_with = "preload_layers")]
         preload_layer_count: Option<usize>,
+
+        /// Runtime backend to use for generation.
+        #[arg(long, default_value_t = BackendKind::Cpu)]
+        backend: BackendKind,
     },
 }
 
@@ -200,6 +209,7 @@ fn main() -> Result<()> {
             prompt,
             max_new_tokens,
             debug,
+            backend,
         } => {
             let total_started = Instant::now();
             let model_dir = resolve_model_dir(
@@ -215,8 +225,9 @@ fn main() -> Result<()> {
             println!("prompt token ids: {:?}", ids);
 
             let load_started = Instant::now();
-            let model = RawLlm::load(&model_dir, &weights)?;
+            let model = RawLlm::load(&model_dir, &weights)?.with_backend(backend)?;
             let model_load_elapsed = load_started.elapsed();
+            eprintln!("using {} backend", model.backend());
 
             // This is intentionally a skeleton. Full generation needs tested RoPE/GQA
             // model execution. This proves raw safetensors-level plumbing first.
@@ -279,6 +290,7 @@ fn main() -> Result<()> {
             debug,
             preload_layers,
             preload_layer_count,
+            backend,
         } => {
             let total_started = Instant::now();
             let tok = LayerTokenizer::from_file(format!("{model_dir}/tokenizer.json"))?;
@@ -287,8 +299,9 @@ fn main() -> Result<()> {
             println!("prompt token ids: {:?}", ids);
 
             let load_started = Instant::now();
-            let mut model = RawLlm::load_layered(&model_dir)?;
+            let mut model = RawLlm::load_layered(&model_dir)?.with_backend(backend)?;
             let model_load_elapsed = load_started.elapsed();
+            eprintln!("using {} backend", model.backend());
 
             let preload_started = Instant::now();
             if preload_layers || preload_layer_count.is_some() {
