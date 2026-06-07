@@ -91,6 +91,14 @@ cargo run -p layerrun-server -- \
 ### 2. List Models (OpenAI-compatible)
 `GET /v1/models`
 
+Use one of the returned `data[].id` values as the `model` in completion requests.
+
+#### Curl Example
+```sh
+curl http://127.0.0.1:8080/v1/models
+export LAYERRUN_MODEL=gemma-4-E4B-it-qat-mobile-transformers
+```
+
 #### Response
 ```json
 {
@@ -113,6 +121,10 @@ cargo run -p layerrun-server -- \
 
 Generates completions for the provided prompt.
 
+For instruction-tuned/chat models such as Gemma, prefer `/v1/chat/completions`.
+Raw completion prompts are not wrapped in the model's chat template and can produce poor
+continuations even when streaming is working correctly.
+
 #### Payload
 ```json
 {
@@ -133,12 +145,12 @@ Set `"stream": true` to receive Server-Sent Events. Each event contains a JSON c
 ```sh
 curl http://127.0.0.1:8080/v1/completions \
   -H 'content-type: application/json' \
-  -d '{
-    "model": "qwen-layered",
-    "prompt": "The capital of France is",
-    "max_tokens": 16,
-    "temperature": 0.0
-  }'
+  -d "{
+    \"model\": \"$LAYERRUN_MODEL\",
+    \"prompt\": \"The capital of France is\",
+    \"max_tokens\": 16,
+    \"temperature\": 0.0
+  }"
 ```
 
 #### Response
@@ -179,12 +191,12 @@ Example:
 ```sh
 curl -N http://127.0.0.1:8080/v1/completions \
   -H 'content-type: application/json' \
-  -d '{
-    "model": "qwen-layered",
-    "prompt": "The capital of France is",
-    "max_tokens": 16,
-    "stream": true
-  }'
+  -d "{
+    \"model\": \"$LAYERRUN_MODEL\",
+    \"prompt\": \"The capital of France is\",
+    \"max_tokens\": 16,
+    \"stream\": true
+  }"
 ```
 
 ---
@@ -212,15 +224,15 @@ Generates a chat response using structural model-specific template formatting.
 ```sh
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{
-    "model": "qwen-layered",
-    "messages": [
-      {"role": "system", "content": "You are a helpful coding assistant."},
-      {"role": "user", "content": "Write a hello world program in Rust"}
+  -d "{
+    \"model\": \"$LAYERRUN_MODEL\",
+    \"messages\": [
+      {\"role\": \"system\", \"content\": \"You are a helpful coding assistant.\"},
+      {\"role\": \"user\", \"content\": \"Write a hello world program in Rust\"}
     ],
-    "max_tokens": 64,
-    "temperature": 0.7
-  }'
+    \"max_tokens\": 64,
+    \"temperature\": 0.7
+  }"
 ```
 
 #### Response
@@ -267,12 +279,12 @@ Example:
 ```sh
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{
-    "model": "qwen-layered",
-    "messages": [{"role": "user", "content": "Write a short greeting"}],
-    "max_tokens": 32,
-    "stream": true
-  }'
+  -d "{
+    \"model\": \"$LAYERRUN_MODEL\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"Write a short greeting\"}],
+    \"max_tokens\": 32,
+    \"stream\": true
+  }"
 ```
 
 ---
