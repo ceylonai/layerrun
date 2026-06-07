@@ -126,8 +126,20 @@ Generates completions for the provided prompt.
 }
 ```
 
-> [!WARNING]
-> Streaming responses are not supported. If `"stream": true` is requested, the server returns a `400 Bad Request` error.
+Set `"stream": true` to receive Server-Sent Events. Each event contains a JSON chunk in its
+`data:` field, and the stream ends with `data: [DONE]`.
+
+#### Curl Example
+```sh
+curl http://127.0.0.1:8080/v1/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "qwen-layered",
+    "prompt": "The capital of France is",
+    "max_tokens": 16,
+    "temperature": 0.0
+  }'
+```
 
 #### Response
 ```json
@@ -154,6 +166,29 @@ Generates completions for the provided prompt.
 
 ---
 
+#### Streaming Response
+```text
+data: {"id":"cmpl-1717789430-1","object":"text_completion","created":1717789430,"model":"qwen-layered","choices":[{"text":" Paris","index":0,"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"cmpl-1717789430-1","object":"text_completion","created":1717789430,"model":"qwen-layered","choices":[{"text":"","index":0,"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}
+
+data: [DONE]
+```
+
+Example:
+```sh
+curl -N http://127.0.0.1:8080/v1/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "qwen-layered",
+    "prompt": "The capital of France is",
+    "max_tokens": 16,
+    "stream": true
+  }'
+```
+
+---
+
 ### 4. Create Chat Completion (OpenAI-compatible)
 `POST /v1/chat/completions`
 
@@ -168,8 +203,24 @@ Generates a chat response using structural model-specific template formatting.
     { "role": "user", "content": "Write a hello world program in Rust" }
   ],
   "max_tokens": 64,
-  "temperature": 0.7
+  "temperature": 0.7,
+  "stream": false
 }
+```
+
+#### Curl Example
+```sh
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "qwen-layered",
+    "messages": [
+      {"role": "system", "content": "You are a helpful coding assistant."},
+      {"role": "user", "content": "Write a hello world program in Rust"}
+    ],
+    "max_tokens": 64,
+    "temperature": 0.7
+  }'
 ```
 
 #### Response
@@ -195,6 +246,33 @@ Generates a chat response using structural model-specific template formatting.
     "total_tokens": 52
   }
 }
+```
+
+---
+
+#### Streaming Response
+When `"stream": true`, chat completions use OpenAI-style chat completion chunks:
+
+```text
+data: {"id":"chatcmpl-1717789445-2","object":"chat.completion.chunk","created":1717789445,"model":"qwen-layered","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-1717789445-2","object":"chat.completion.chunk","created":1717789445,"model":"qwen-layered","choices":[{"index":0,"delta":{"content":"Here"},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-1717789445-2","object":"chat.completion.chunk","created":1717789445,"model":"qwen-layered","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":24,"completion_tokens":1,"total_tokens":25}}
+
+data: [DONE]
+```
+
+Example:
+```sh
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "qwen-layered",
+    "messages": [{"role": "user", "content": "Write a short greeting"}],
+    "max_tokens": 32,
+    "stream": true
+  }'
 ```
 
 ---

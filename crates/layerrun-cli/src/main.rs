@@ -3,11 +3,11 @@ use clap::{Parser, Subcommand};
 use layerrun_core::backend::BackendKind;
 use layerrun_core::config::ModelConfig;
 use layerrun_core::huggingface::HuggingFaceSource;
-use layerrun_core::model::RawLlm;
+use layerrun_core::model::{RawLlm, SamplingConfig};
 use layerrun_core::safetensor_loader::SafeTensorFile;
 use layerrun_core::tokenizer_wrap::LayerTokenizer;
 use serde::Deserialize;
-use std::{fs, path::Path, path::PathBuf, time::Instant};
+use std::{fs, io::Write, path::Path, path::PathBuf, time::Instant};
 
 #[derive(Parser, Debug)]
 #[command(name = "layerrun_raw")]
@@ -96,6 +96,10 @@ enum Commands {
         #[arg(long)]
         debug: bool,
 
+        /// Print generated text incrementally as each token is produced.
+        #[arg(long)]
+        stream: bool,
+
         /// Runtime backend to use for generation.
         #[arg(long, default_value_t = BackendKind::Cpu)]
         backend: BackendKind,
@@ -143,6 +147,10 @@ enum Commands {
 
         #[arg(long)]
         debug: bool,
+
+        /// Print generated text incrementally as each token is produced.
+        #[arg(long)]
+        stream: bool,
 
         #[arg(long)]
         preload_layers: bool,
@@ -234,6 +242,7 @@ fn main() -> Result<()> {
             prompt,
             max_new_tokens,
             debug,
+            stream,
             backend,
         } => {
             let total_started = Instant::now();
@@ -264,18 +273,15 @@ fn main() -> Result<()> {
             let input_ids: Vec<usize> = ids.iter().map(|x| *x as usize).collect();
 
             let generation_started = Instant::now();
-            let output_ids_usize =
-                model.generate_greedy_with_debug(&input_ids, max_new_tokens, debug)?;
+            let (output_ids_usize, generated_only, generated_decoded) =
+                generate_greedy_cli(&model, &tok, &input_ids, max_new_tokens, debug, stream)?;
             let generation_elapsed = generation_started.elapsed();
 
             let output_ids: Vec<u32> = output_ids_usize.iter().map(|x| *x as u32).collect();
 
             println!("output ids: {:?}", output_ids);
-
-            let generated_only: Vec<u32> = output_ids.iter().skip(ids.len()).copied().collect();
-
             println!("generated ids: {:?}", generated_only);
-            println!("generated decoded: {}", tok.decode(&generated_only)?);
+            println!("generated decoded: {}", generated_decoded);
             println!(
                 "timing: model_load_ms={:.3} generation_ms={:.3} total_ms={:.3}",
                 model_load_elapsed.as_secs_f64() * 1000.0,
@@ -318,6 +324,7 @@ fn main() -> Result<()> {
             prompt,
             max_new_tokens,
             debug,
+            stream,
             preload_layers,
             preload_layer_count,
             backend,
@@ -366,17 +373,15 @@ fn main() -> Result<()> {
                     ""
                 }
             );
-            let output_ids_usize =
-                model.generate_greedy_with_debug(&input_ids, max_new_tokens, debug)?;
+            let (output_ids_usize, generated_only, generated_decoded) =
+                generate_greedy_cli(&model, &tok, &input_ids, max_new_tokens, debug, stream)?;
             let generation_elapsed = generation_started.elapsed();
 
             let output_ids: Vec<u32> = output_ids_usize.iter().map(|x| *x as u32).collect();
 
-            let generated_only: Vec<u32> = output_ids.iter().skip(ids.len()).copied().collect();
-
             println!("output ids: {:?}", output_ids);
             println!("generated ids: {:?}", generated_only);
-            println!("generated decoded: {}", tok.decode(&generated_only)?);
+            println!("generated decoded: {}", generated_decoded);
             println!(
                 "timing: model_load_ms={:.3} preload_ms={:.3} generation_ms={:.3} total_ms={:.3}",
                 model_load_elapsed.as_secs_f64() * 1000.0,
@@ -406,6 +411,56 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn generate_greedy_cli(
+    model: &RawLlm,
+    tokenizer: &LayerTokenizer,
+    input_ids: &[usize],
+    max_new_tokens: usize,
+    debug: bool,
+    stream: bool,
+) -> Result<(Vec<usize>, Vec<u32>, String)> {
+    if !stream {
+        let output_ids = model.generate_greedy_with_debug(input_ids, max_new_tokens, debug)?;
+        let generated_ids: Vec<u32> = output_ids
+            .iter()
+            .skip(input_ids.len())
+            .map(|id| *id as u32)
+            .collect();
+        let generated_decoded = tokenizer.decode(&generated_ids)?;
+        return Ok((output_ids, generated_ids, generated_decoded));
+    }
+
+    let mut generated_ids = Vec::<u32>::new();
+    let mut decoded_text = String::new();
+    let mut stdout = std::io::stdout().lock();
+
+    let output_ids = model.generate_with_sampling_stream_with_debug(
+        input_ids,
+        max_new_tokens,
+        SamplingConfig::greedy(),
+        debug,
+        |_, token_id| {
+            generated_ids.push(token_id as u32);
+            let next_text = tokenizer.decode(&generated_ids)?;
+            let delta = next_text
+                .strip_prefix(&decoded_text)
+                .map(str::to_string)
+                .unwrap_or_else(|| tokenizer.decode(&[token_id as u32]).unwrap_or_default());
+            decoded_text = next_text;
+
+            if !delta.is_empty() {
+                write!(stdout, "{delta}")?;
+                stdout.flush()?;
+            }
+
+            Ok(())
+        },
+    )?;
+    writeln!(stdout)?;
+
+    Ok((output_ids, generated_ids, decoded_text))
 }
 
 #[derive(Debug, Deserialize)]

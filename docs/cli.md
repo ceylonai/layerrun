@@ -107,6 +107,7 @@ cargo run -p layerrun-cli -- generate [options]
 * `--prompt <PROMPT>`: Prompt text to generate from.
 * `--max-new-tokens <MAX_NEW_TOKENS>`: Number of new tokens to generate (default: `8`).
 * `--debug`: If set, prints additional model execution steps, tensor shape calculations, and elapsed timings.
+* `--stream`: Prints generated text incrementally as each token is produced.
 * `--backend <BACKEND>`: Compute backend, either `cpu` or `mlx` (default: `cpu`).
 
 > [!NOTE]
@@ -119,6 +120,15 @@ cargo run -p layerrun-cli -- generate \
   --model-dir models/qwen \
   --prompt "Write a short greeting" \
   --max-new-tokens 8
+```
+
+#### Streaming Example
+```sh
+cargo run -p layerrun-cli -- generate \
+  --model-dir models/qwen \
+  --prompt "Write a short greeting" \
+  --max-new-tokens 32 \
+  --stream
 ```
 
 ---
@@ -169,6 +179,7 @@ cargo run -p layerrun-cli -- generate-layered [options]
 * `--prompt <PROMPT>`: Prompt text.
 * `--max-new-tokens <MAX_NEW_TOKENS>`: Number of new tokens to generate (default: `8`).
 * `--debug`: Prints step-by-step model execution details and timing logs.
+* `--stream`: Prints generated text incrementally as each token is produced.
 * `--preload-layers`: Loads all per-layer weights into memory before generation starts.
 * `--preload-layer-count <N>`: Loads only the first `N` layers into memory, streaming the remaining layers. *(Conflicts with `--preload-layers`)*.
 * `--backend <BACKEND>`: Compute backend, either `cpu` or `mlx` (default: `cpu`).
@@ -184,6 +195,16 @@ cargo run -p layerrun-cli -- generate-layered \
   --prompt "Write a short greeting" \
   --max-new-tokens 8 \
   --preload-layers
+```
+
+#### Streaming Example
+```sh
+cargo run --release -p layerrun-cli -- generate-layered \
+  --model-dir models/qwen-layered \
+  --prompt "Write a short greeting" \
+  --max-new-tokens 32 \
+  --preload-layers \
+  --stream
 ```
 
 ---

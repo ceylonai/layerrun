@@ -399,6 +399,26 @@ impl RawLlm {
         sampling: SamplingConfig,
         debug: bool,
     ) -> Result<Vec<usize>> {
+        self.generate_with_sampling_stream_with_debug(
+            input_ids,
+            max_new_tokens,
+            sampling,
+            debug,
+            |_, _| Ok(()),
+        )
+    }
+
+    pub fn generate_with_sampling_stream_with_debug<F>(
+        &self,
+        input_ids: &[usize],
+        max_new_tokens: usize,
+        sampling: SamplingConfig,
+        debug: bool,
+        mut on_token: F,
+    ) -> Result<Vec<usize>>
+    where
+        F: FnMut(usize, usize) -> Result<()>,
+    {
         if input_ids.is_empty() {
             anyhow::bail!("input_ids is empty");
         }
@@ -443,6 +463,7 @@ impl RawLlm {
             let next_logit = logits[next];
 
             out.push(next);
+            on_token(step, next)?;
 
             if debug {
                 eprintln!(

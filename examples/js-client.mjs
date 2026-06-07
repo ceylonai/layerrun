@@ -21,6 +21,7 @@ function usage() {
   node examples/js-client.mjs show <model>
   node examples/js-client.mjs complete <model> <prompt>
   node examples/js-client.mjs chat <model> <prompt>
+  node examples/js-client.mjs chat-stream <model> <prompt>
 
 Environment:
   LAYERRUN_BASE_URL   Server URL. Defaults to http://127.0.0.1:8080
@@ -53,6 +54,45 @@ async function request(path, options = {}) {
   }
 
   return body;
+}
+
+async function streamRequest(path, options = {}, onChunk) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...options,
+    headers: {
+      "content-type": "application/json",
+      ...(options.headers ?? {}),
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    const body = text ? JSON.parse(text) : null;
+    const message = body?.error?.message ?? response.statusText;
+    throw new Error(`${response.status} ${message}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+
+    for (const event of events) {
+      for (const line of event.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice("data:".length).trimStart();
+        if (data === "[DONE]") return;
+        onChunk(JSON.parse(data));
+      }
+    }
+  }
 }
 
 function parseModelAndPrompt(args) {
@@ -133,6 +173,29 @@ async function main() {
         }),
       });
       console.log(body.choices[0]?.message?.content ?? "");
+      break;
+    }
+
+    case "chat-stream": {
+      const { model, prompt } = parseModelAndPrompt(args);
+      await streamRequest(
+        "/v1/chat/completions",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            model,
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 32,
+            stream: true,
+            ...samplingOptions(),
+          }),
+        },
+        (chunk) => {
+          const content = chunk.choices[0]?.delta?.content;
+          if (content) process.stdout.write(content);
+        },
+      );
+      process.stdout.write("\n");
       break;
     }
 

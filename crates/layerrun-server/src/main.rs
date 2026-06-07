@@ -3,7 +3,10 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{get, post},
 };
 use clap::Parser;
@@ -27,6 +30,8 @@ use std::{
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -285,8 +290,8 @@ enum Prompt {
 async fn create_completion(
     State(state): State<AppState>,
     Json(request): Json<CompletionRequest>,
-) -> Result<Json<Value>, ApiError> {
-    reject_streaming(request.stream)?;
+) -> Result<Response, ApiError> {
+    let stream = request.stream.unwrap_or(false);
     let model_id = state
         .catalog
         .resolve_request_model(request.model.as_deref())?;
@@ -300,6 +305,10 @@ async fn create_completion(
         .or(request.max_completion_tokens)
         .unwrap_or(16);
     let sampling = validate_sampling(request.temperature, request.top_k, request.top_p)?;
+
+    if stream {
+        return create_completion_stream(state, model_id, prompt, max_tokens, sampling);
+    }
 
     let generated = generate_text(&state, &model_id, &prompt, max_tokens, sampling).await?;
     log_completion("completion", &model_id, &prompt, &generated, &state);
@@ -320,7 +329,8 @@ async fn create_completion(
             "completion_tokens": generated.completion_tokens,
             "total_tokens": generated.total_tokens
         }
-    })))
+    }))
+    .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,8 +369,8 @@ struct ChatContentPart {
 async fn create_chat_completion(
     State(state): State<AppState>,
     Json(request): Json<ChatCompletionRequest>,
-) -> Result<Json<Value>, ApiError> {
-    reject_streaming(request.stream)?;
+) -> Result<Response, ApiError> {
+    let stream = request.stream.unwrap_or(false);
     let model_id = state
         .catalog
         .resolve_request_model(request.model.as_deref())?;
@@ -375,6 +385,11 @@ async fn create_chat_completion(
         .or(request.max_completion_tokens)
         .unwrap_or(16);
     let sampling = validate_sampling(request.temperature, request.top_k, request.top_p)?;
+
+    if stream {
+        return create_chat_completion_stream(state, model_id, prompt, max_tokens, sampling);
+    }
+
     let generated = generate_text(&state, &model_id, &prompt, max_tokens, sampling).await?;
     log_completion("chat.completion", &model_id, &prompt, &generated, &state);
 
@@ -396,7 +411,8 @@ async fn create_chat_completion(
             "completion_tokens": generated.completion_tokens,
             "total_tokens": generated.total_tokens
         }
-    })))
+    }))
+    .into_response())
 }
 
 struct GeneratedText {
@@ -408,6 +424,63 @@ struct GeneratedText {
     finish_reason: &'static str,
     sampling: SamplingConfig,
     elapsed_ms: f64,
+}
+
+#[derive(Clone, Copy)]
+enum StreamKind {
+    Completion,
+    ChatCompletion,
+}
+
+fn create_completion_stream(
+    state: AppState,
+    model_id: String,
+    prompt: String,
+    max_tokens: usize,
+    sampling: SamplingConfig,
+) -> Result<Response, ApiError> {
+    Ok(stream_response(
+        state,
+        model_id,
+        prompt,
+        max_tokens,
+        sampling,
+        StreamKind::Completion,
+    ))
+}
+
+fn create_chat_completion_stream(
+    state: AppState,
+    model_id: String,
+    prompt: String,
+    max_tokens: usize,
+    sampling: SamplingConfig,
+) -> Result<Response, ApiError> {
+    Ok(stream_response(
+        state,
+        model_id,
+        prompt,
+        max_tokens,
+        sampling,
+        StreamKind::ChatCompletion,
+    ))
+}
+
+fn stream_response(
+    state: AppState,
+    model_id: String,
+    prompt: String,
+    max_tokens: usize,
+    sampling: SamplingConfig,
+    kind: StreamKind,
+) -> Response {
+    let (sender, receiver) = mpsc::channel::<Result<Event, std::convert::Infallible>>(32);
+
+    tokio::task::spawn_blocking(move || {
+        run_streaming_generation(state, model_id, prompt, max_tokens, sampling, kind, sender);
+    });
+
+    Sse::new(ReceiverStream::new(receiver)).into_response()
 }
 
 async fn generate_text(
@@ -528,6 +601,294 @@ async fn generate_text(
     Ok(generated)
 }
 
+fn run_streaming_generation(
+    state: AppState,
+    model_id: String,
+    prompt: String,
+    max_tokens: usize,
+    sampling: SamplingConfig,
+    kind: StreamKind,
+    sender: mpsc::Sender<Result<Event, std::convert::Infallible>>,
+) {
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let response_id = match kind {
+        StreamKind::Completion => next_id("cmpl"),
+        StreamKind::ChatCompletion => next_id("chatcmpl"),
+    };
+    let created = now_ts();
+    let started = Instant::now();
+
+    eprintln!(
+        "[completion:{request_id}] stream_request_start model={} max_tokens={} temperature={:.3} top_k={:?} top_p={:.3} prompt_chars={}",
+        model_id,
+        max_tokens,
+        sampling.temperature,
+        sampling.top_k,
+        sampling.top_p,
+        prompt.chars().count(),
+    );
+
+    if matches!(kind, StreamKind::ChatCompletion)
+        && !send_sse_json(
+            &sender,
+            chat_stream_chunk(
+                &response_id,
+                created,
+                &model_id,
+                Some("assistant"),
+                "",
+                None,
+                None,
+            ),
+        )
+    {
+        return;
+    }
+
+    let result = (|| -> Result<GeneratedText, ApiError> {
+        let phase_started = Instant::now();
+        eprintln!("[completion:{request_id}] load_start model={model_id}");
+        let loaded = state.catalog.load(&model_id, state.debug)?;
+        eprintln!(
+            "[completion:{request_id}] load_done elapsed_ms={:.3}",
+            phase_started.elapsed().as_secs_f64() * 1000.0
+        );
+
+        let phase_started = Instant::now();
+        eprintln!("[completion:{request_id}] tokenize_start");
+        let input_ids = loaded
+            .tokenizer
+            .encode(&prompt)
+            .map_err(ApiError::internal)?;
+        eprintln!(
+            "[completion:{request_id}] tokenize_done prompt_tokens={} elapsed_ms={:.3}",
+            input_ids.len(),
+            phase_started.elapsed().as_secs_f64() * 1000.0
+        );
+
+        let input_ids_usize: Vec<usize> = input_ids.iter().map(|id| *id as usize).collect();
+        let mut generated_ids = Vec::<u32>::new();
+        let mut decoded_text = String::new();
+
+        {
+            let model = loaded
+                .model
+                .lock()
+                .map_err(|_| ApiError::internal(anyhow::anyhow!("model lock poisoned")))?;
+            let phase_started = Instant::now();
+            eprintln!(
+                "[completion:{request_id}] stream_generation_start prompt_tokens={} max_tokens={} temperature={:.3} top_k={:?} top_p={:.3}",
+                input_ids_usize.len(),
+                max_tokens,
+                sampling.temperature,
+                sampling.top_k,
+                sampling.top_p,
+            );
+            model
+                .generate_with_sampling_stream_with_debug(
+                    &input_ids_usize,
+                    max_tokens,
+                    sampling,
+                    state.debug,
+                    |_, token_id| {
+                        generated_ids.push(token_id as u32);
+                        let next_text = loaded.tokenizer.decode(&generated_ids)?;
+                        let delta = next_text
+                            .strip_prefix(&decoded_text)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                loaded
+                                    .tokenizer
+                                    .decode(&[token_id as u32])
+                                    .unwrap_or_default()
+                            });
+                        decoded_text = next_text;
+
+                        if delta.is_empty() {
+                            return Ok(());
+                        }
+
+                        let chunk = match kind {
+                            StreamKind::Completion => completion_stream_chunk(
+                                &response_id,
+                                created,
+                                &model_id,
+                                &delta,
+                                None,
+                                None,
+                            ),
+                            StreamKind::ChatCompletion => chat_stream_chunk(
+                                &response_id,
+                                created,
+                                &model_id,
+                                None,
+                                &delta,
+                                None,
+                                None,
+                            ),
+                        };
+
+                        if send_sse_json(&sender, chunk) {
+                            Ok(())
+                        } else {
+                            anyhow::bail!("client disconnected")
+                        }
+                    },
+                )
+                .map_err(ApiError::internal)?;
+            eprintln!(
+                "[completion:{request_id}] stream_generation_done output_tokens={} elapsed_ms={:.3}",
+                input_ids.len() + generated_ids.len(),
+                phase_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+
+        let completion_tokens = generated_ids.len();
+        Ok(GeneratedText {
+            request_id,
+            text: decoded_text,
+            prompt_tokens: input_ids.len(),
+            completion_tokens,
+            total_tokens: input_ids.len() + completion_tokens,
+            finish_reason: if completion_tokens < max_tokens {
+                "stop"
+            } else {
+                "length"
+            },
+            sampling,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        })
+    })();
+
+    match result {
+        Ok(generated) => {
+            let usage = json!({
+                "prompt_tokens": generated.prompt_tokens,
+                "completion_tokens": generated.completion_tokens,
+                "total_tokens": generated.total_tokens
+            });
+            let final_chunk = match kind {
+                StreamKind::Completion => completion_stream_chunk(
+                    &response_id,
+                    created,
+                    &model_id,
+                    "",
+                    Some(generated.finish_reason),
+                    Some(usage),
+                ),
+                StreamKind::ChatCompletion => chat_stream_chunk(
+                    &response_id,
+                    created,
+                    &model_id,
+                    None,
+                    "",
+                    Some(generated.finish_reason),
+                    Some(usage),
+                ),
+            };
+            send_sse_json(&sender, final_chunk);
+            send_sse_done(&sender);
+            log_completion(
+                match kind {
+                    StreamKind::Completion => "completion.stream",
+                    StreamKind::ChatCompletion => "chat.completion.stream",
+                },
+                &model_id,
+                &prompt,
+                &generated,
+                &state,
+            );
+        }
+        Err(error) => {
+            send_sse_json(
+                &sender,
+                json!({
+                    "error": {
+                        "message": error.message,
+                        "type": if error.status == StatusCode::BAD_REQUEST {
+                            "invalid_request_error"
+                        } else {
+                            "server_error"
+                        },
+                        "param": null,
+                        "code": null
+                    }
+                }),
+            );
+            send_sse_done(&sender);
+        }
+    }
+}
+
+fn completion_stream_chunk(
+    id: &str,
+    created: i64,
+    model_id: &str,
+    text: &str,
+    finish_reason: Option<&str>,
+    usage: Option<Value>,
+) -> Value {
+    json!({
+        "id": id,
+        "object": "text_completion",
+        "created": created,
+        "model": model_id,
+        "choices": [{
+            "text": text,
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": finish_reason
+        }],
+        "usage": usage
+    })
+}
+
+fn chat_stream_chunk(
+    id: &str,
+    created: i64,
+    model_id: &str,
+    role: Option<&str>,
+    content: &str,
+    finish_reason: Option<&str>,
+    usage: Option<Value>,
+) -> Value {
+    let mut delta = serde_json::Map::new();
+    if let Some(role) = role {
+        delta.insert("role".to_string(), json!(role));
+    }
+    if !content.is_empty() {
+        delta.insert("content".to_string(), json!(content));
+    }
+
+    json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_id,
+        "choices": [{
+            "index": 0,
+            "delta": Value::Object(delta),
+            "finish_reason": finish_reason
+        }],
+        "usage": usage
+    })
+}
+
+fn send_sse_json(
+    sender: &mpsc::Sender<Result<Event, std::convert::Infallible>>,
+    value: Value,
+) -> bool {
+    sender
+        .blocking_send(Ok(Event::default().data(value.to_string())))
+        .is_ok()
+}
+
+fn send_sse_done(sender: &mpsc::Sender<Result<Event, std::convert::Infallible>>) -> bool {
+    sender
+        .blocking_send(Ok(Event::default().data("[DONE]")))
+        .is_ok()
+}
+
 fn log_completion(
     endpoint: &str,
     model_id: &str,
@@ -598,15 +959,6 @@ fn chat_content_text(content: &ChatContent) -> String {
             .join(""),
         ChatContent::Null(_) => String::new(),
     }
-}
-
-fn reject_streaming(stream: Option<bool>) -> Result<(), ApiError> {
-    if stream.unwrap_or(false) {
-        return Err(ApiError::bad_request(
-            "streaming responses are not supported yet",
-        ));
-    }
-    Ok(())
 }
 
 fn validate_sampling(
