@@ -59,6 +59,7 @@ pub struct ModelConfig {
 
     pub rope_theta: Option<f32>,
     pub rope_thetas_by_layer_type: HashMap<String, f32>,
+    pub rope_partial_rotary_factors_by_layer_type: HashMap<String, f32>,
 
     pub max_position_embeddings: Option<usize>,
 
@@ -220,6 +221,11 @@ impl ModelConfig {
                 .as_ref()
                 .map(rope_thetas_by_layer_type)
                 .unwrap_or_default(),
+            rope_partial_rotary_factors_by_layer_type: raw
+                .rope_parameters
+                .as_ref()
+                .map(rope_partial_rotary_factors_by_layer_type)
+                .unwrap_or_default(),
             max_position_embeddings: raw.max_position_embeddings,
             sliding_window: raw.sliding_window,
             use_sliding_window: raw.use_sliding_window,
@@ -331,6 +337,19 @@ impl ModelConfig {
             .unwrap_or_else(|| self.rope_theta())
     }
 
+    pub fn layer_rotary_dim(&self, layer_id: usize) -> usize {
+        let head_dim = self.layer_head_dim(layer_id);
+        let Some(factor) = self.layer_type(layer_id).and_then(|layer_type| {
+            self.rope_partial_rotary_factors_by_layer_type
+                .get(layer_type)
+        }) else {
+            return head_dim;
+        };
+
+        let rotary_dim = (head_dim as f32 * factor).round() as usize;
+        rotary_dim.clamp(2, head_dim)
+    }
+
     pub fn rms_norm_eps(&self) -> f32 {
         self.rms_norm_eps.unwrap_or(1e-6)
     }
@@ -348,10 +367,42 @@ impl ModelConfig {
     pub fn attention_window(&self) -> Option<usize> {
         match self.family() {
             ModelFamily::Mistral if self.use_sliding_window.unwrap_or(true) => self.sliding_window,
-            ModelFamily::Gemma4 => self.sliding_window,
             _ if self.use_sliding_window.unwrap_or(false) => self.sliding_window,
             _ => None,
         }
+    }
+
+    pub fn layer_attention_window(&self, layer_id: usize) -> Option<usize> {
+        match self.family() {
+            ModelFamily::Gemma4 if self.layer_type(layer_id) == Some("sliding_attention") => {
+                self.sliding_window
+            }
+            _ => self.attention_window(),
+        }
+    }
+
+    pub fn gemma4_first_kv_shared_layer(&self) -> Option<usize> {
+        if self.family() != ModelFamily::Gemma4 {
+            return None;
+        }
+
+        let shared_layers = self.num_kv_shared_layers?;
+        Some(self.num_hidden_layers.saturating_sub(shared_layers))
+    }
+
+    pub fn gemma4_shared_kv_source_layer(&self, layer_id: usize) -> Option<usize> {
+        let first_shared = self.gemma4_first_kv_shared_layer()?;
+        if layer_id < first_shared {
+            return None;
+        }
+
+        let layer_type = self.layer_type(layer_id)?;
+        self.layer_types[..first_shared]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, candidate_type)| candidate_type.as_str() == layer_type)
+            .map(|(source_layer, _)| source_layer)
     }
 
     pub fn use_gelu_mlp(&self) -> bool {
@@ -376,6 +427,23 @@ fn rope_thetas_by_layer_type(value: &serde_json::Value) -> HashMap<String, f32> 
         for (key, value) in object {
             if let Some(theta) = default_rope_theta(value) {
                 out.insert(key.clone(), theta);
+            }
+        }
+    }
+
+    out
+}
+
+fn rope_partial_rotary_factors_by_layer_type(value: &serde_json::Value) -> HashMap<String, f32> {
+    let mut out = HashMap::new();
+
+    if let Some(object) = value.as_object() {
+        for (key, value) in object {
+            if let Some(factor) = value
+                .get("partial_rotary_factor")
+                .and_then(serde_json::Value::as_f64)
+            {
+                out.insert(key.clone(), factor as f32);
             }
         }
     }

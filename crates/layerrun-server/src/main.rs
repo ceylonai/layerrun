@@ -9,6 +9,7 @@ use axum::{
 use clap::Parser;
 use layerrun_core::{
     backend::BackendKind,
+    chat_template::{ChatMessage as TemplateChatMessage, ChatTemplate},
     huggingface::HuggingFaceSource,
     model::{RawLlm, SamplingConfig},
     tokenizer_wrap::LayerTokenizer,
@@ -137,6 +138,7 @@ enum ModelSource {
 
 struct LoadedModel {
     tokenizer: LayerTokenizer,
+    chat_template: ChatTemplate,
     model: Mutex<RawLlm>,
 }
 
@@ -366,7 +368,8 @@ async fn create_chat_completion(
         return Err(ApiError::bad_request("messages must not be empty"));
     }
 
-    let prompt = render_chat_prompt(&request.messages);
+    let template_messages = template_chat_messages(&request.messages);
+    let prompt = render_chat_prompt_for_model(&state, &model_id, &template_messages).await?;
     let max_tokens = request
         .max_tokens
         .or(request.max_completion_tokens)
@@ -557,26 +560,44 @@ fn log_completion(
     }
 }
 
-fn render_chat_prompt(messages: &[ChatMessage]) -> String {
-    let mut prompt = String::new();
-    for message in messages {
-        let content = match &message.content {
-            ChatContent::String(content) => content.clone(),
-            ChatContent::Parts(parts) => parts
-                .iter()
-                .filter(|part| part.kind == "text")
-                .filter_map(|part| part.text.as_deref())
-                .collect::<Vec<_>>()
-                .join(""),
-            ChatContent::Null(_) => String::new(),
-        };
-        prompt.push_str(&message.role);
-        prompt.push_str(": ");
-        prompt.push_str(&content);
-        prompt.push('\n');
+async fn render_chat_prompt_for_model(
+    state: &AppState,
+    model_id: &str,
+    messages: &[TemplateChatMessage],
+) -> Result<String, ApiError> {
+    let state = state.clone();
+    let model_id = model_id.to_string();
+    let messages = messages.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        let loaded = state.catalog.load(&model_id, state.debug)?;
+        Ok(loaded.chat_template.render(&messages, true))
+    })
+    .await
+    .map_err(|err| ApiError::internal(anyhow::anyhow!("chat template task failed: {err}")))?
+}
+
+fn template_chat_messages(messages: &[ChatMessage]) -> Vec<TemplateChatMessage> {
+    messages
+        .iter()
+        .map(|message| TemplateChatMessage {
+            role: message.role.clone(),
+            content: chat_content_text(&message.content),
+        })
+        .collect()
+}
+
+fn chat_content_text(content: &ChatContent) -> String {
+    match content {
+        ChatContent::String(content) => content.clone(),
+        ChatContent::Parts(parts) => parts
+            .iter()
+            .filter(|part| part.kind == "text")
+            .filter_map(|part| part.text.as_deref())
+            .collect::<Vec<_>>()
+            .join(""),
+        ChatContent::Null(_) => String::new(),
     }
-    prompt.push_str("assistant: ");
-    prompt
 }
 
 fn reject_streaming(stream: Option<bool>) -> Result<(), ApiError> {
@@ -883,6 +904,14 @@ impl ModelSpec {
             phase_started.elapsed().as_secs_f64() * 1000.0
         );
 
+        let chat_template = ChatTemplate::from_model_dir(&model_dir, &model.config)?;
+        eprintln!(
+            "[model:{}] chat_template kind={:?} source={}",
+            self.id,
+            chat_template.kind(),
+            chat_template.source_name()
+        );
+
         if let Some(count) = self.preload_layer_count {
             if !layered {
                 anyhow::bail!("cannot preload layers for non-layered model {}", self.id);
@@ -909,6 +938,7 @@ impl ModelSpec {
 
         Ok(LoadedModel {
             tokenizer,
+            chat_template,
             model: Mutex::new(model),
         })
     }

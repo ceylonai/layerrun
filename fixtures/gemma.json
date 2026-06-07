@@ -1,0 +1,46 @@
+{
+  "reference": {
+    "runtime": "huggingface-transformers",
+    "model": "google/gemma-4-E4B-it-qat-mobile-transformers",
+    "dtype": "auto",
+    "revision": null
+  },
+  "top_n": 10,
+  "logit_atol": 0.5,
+  "logit_rtol": 0.05,
+  "require_top_token_ids": true,
+  "cases": [
+    {
+      "name": "short_hello",
+      "prompt": "Hello",
+      "token_ids": [
+        9259
+      ],
+      "first_token_top_logits": [],
+      "greedy": {
+        "max_new_tokens": 4,
+        "temperature": 0.0,
+        "generated_ids": [],
+        "mismatches": []
+      }
+    },
+    {
+      "name": "short_fact",
+      "prompt": "The capital of France is",
+      "token_ids": [
+        818,
+        5279,
+        529,
+        7001,
+        563
+      ],
+      "first_token_top_logits": [],
+      "greedy": {
+        "max_new_tokens": 4,
+        "temperature": 0.0,
+        "generated_ids": [],
+        "mismatches": []
+      }
+    }
+  ]
+}

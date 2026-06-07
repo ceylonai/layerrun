@@ -57,6 +57,29 @@ impl LayerStore {
         }
     }
 
+    pub fn load_per_layer_projection(
+        &self,
+        cfg: &ModelConfig,
+    ) -> Result<(Option<Tensor>, Option<Tensor>)> {
+        let Some(hidden_size_per_layer_input) = cfg.hidden_size_per_layer_input else {
+            return Ok((None, None));
+        };
+
+        let file = SafeTensorFile::open(self.embeddings_path())?;
+        let packed_hidden = cfg.num_hidden_layers * hidden_size_per_layer_input;
+        let projection = file
+            .tensor_f32_or_gemma_qat(
+                "model.per_layer_model_projection.weight",
+                &[packed_hidden, cfg.hidden_size],
+            )
+            .ok();
+        let norm = file
+            .tensor_f32("model.per_layer_projection_norm.weight")
+            .ok();
+
+        Ok((projection, norm))
+    }
+
     pub fn load_final_norm(&self) -> Result<Tensor> {
         let file = SafeTensorFile::open(self.final_path())?;
         file.tensor_f32("model.norm.weight")

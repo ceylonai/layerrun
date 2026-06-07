@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use layerrun_core::backend::BackendKind;
 use layerrun_core::config::ModelConfig;
@@ -6,7 +6,8 @@ use layerrun_core::huggingface::HuggingFaceSource;
 use layerrun_core::model::RawLlm;
 use layerrun_core::safetensor_loader::SafeTensorFile;
 use layerrun_core::tokenizer_wrap::LayerTokenizer;
-use std::{path::PathBuf, time::Instant};
+use serde::Deserialize;
+use std::{fs, path::Path, path::PathBuf, time::Instant};
 
 #[derive(Parser, Debug)]
 #[command(name = "layerrun_raw")]
@@ -153,6 +154,30 @@ enum Commands {
         /// Runtime backend to use for generation.
         #[arg(long, default_value_t = BackendKind::Cpu)]
         backend: BackendKind,
+    },
+
+    /// Validate LayerRun tokenizer, logits, and greedy generation against reference fixtures.
+    Validate {
+        #[arg(long)]
+        model_dir: String,
+
+        #[arg(long)]
+        fixtures: PathBuf,
+
+        /// Name of the safetensors file for non-layered model directories.
+        #[arg(long, default_value = "model.safetensors")]
+        weights: String,
+
+        /// Runtime backend to use for validation.
+        #[arg(long, default_value_t = BackendKind::Cpu)]
+        backend: BackendKind,
+
+        #[arg(long)]
+        preload_layers: bool,
+
+        /// Preload the first N per-layer weight files before validation.
+        #[arg(long, conflicts_with = "preload_layers")]
+        preload_layer_count: Option<usize>,
     },
 }
 
@@ -360,9 +385,338 @@ fn main() -> Result<()> {
                 total_started.elapsed().as_secs_f64() * 1000.0,
             );
         }
+
+        Commands::Validate {
+            model_dir,
+            fixtures,
+            weights,
+            backend,
+            preload_layers,
+            preload_layer_count,
+        } => {
+            run_validate(
+                &model_dir,
+                &fixtures,
+                &weights,
+                backend,
+                preload_layers,
+                preload_layer_count,
+            )?;
+        }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidationFixtures {
+    reference: ReferenceRuntime,
+    #[serde(default = "default_top_n")]
+    top_n: usize,
+    #[serde(default = "default_logit_atol")]
+    logit_atol: f32,
+    #[serde(default = "default_logit_rtol")]
+    logit_rtol: f32,
+    #[serde(default = "default_true")]
+    require_top_token_ids: bool,
+    cases: Vec<ValidationCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceRuntime {
+    runtime: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    dtype: Option<String>,
+    #[serde(default)]
+    revision: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidationCase {
+    name: String,
+    prompt: String,
+    token_ids: Vec<u32>,
+    first_token_top_logits: Vec<ExpectedLogit>,
+    greedy: GreedyFixture,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedLogit {
+    token_id: u32,
+    logit: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct GreedyFixture {
+    max_new_tokens: usize,
+    #[serde(default)]
+    temperature: f32,
+    generated_ids: Vec<u32>,
+    #[serde(default)]
+    mismatches: Vec<ExplainedMismatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExplainedMismatch {
+    position: usize,
+    expected: u32,
+    actual: u32,
+    reason: String,
+}
+
+fn default_top_n() -> usize {
+    10
+}
+
+fn default_logit_atol() -> f32 {
+    0.5
+}
+
+fn default_logit_rtol() -> f32 {
+    0.05
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn run_validate(
+    model_dir: &str,
+    fixtures_path: &Path,
+    weights: &str,
+    backend: BackendKind,
+    preload_layers: bool,
+    preload_layer_count: Option<usize>,
+) -> Result<()> {
+    let fixture_text = fs::read_to_string(fixtures_path)
+        .with_context(|| format!("failed to read fixtures {}", fixtures_path.display()))?;
+    let fixtures: ValidationFixtures = serde_json::from_str(&fixture_text)
+        .with_context(|| format!("failed to parse fixtures {}", fixtures_path.display()))?;
+
+    if fixtures.cases.is_empty() {
+        anyhow::bail!("fixtures must contain at least one validation case");
+    }
+    if fixtures.top_n == 0 {
+        anyhow::bail!("top_n must be greater than zero");
+    }
+    validate_fixture_completeness(&fixtures)?;
+
+    println!(
+        "reference runtime: {} model={:?} dtype={:?} revision={:?}",
+        fixtures.reference.runtime,
+        fixtures.reference.model,
+        fixtures.reference.dtype,
+        fixtures.reference.revision
+    );
+
+    let tok = LayerTokenizer::from_file(format!("{model_dir}/tokenizer.json"))?;
+    let mut model = load_model_auto(model_dir, weights)?.with_backend(backend)?;
+    eprintln!("using {} backend", model.backend());
+
+    if model.layer_store.is_some() && (preload_layers || preload_layer_count.is_some()) {
+        let count = preload_layer_count.unwrap_or(model.config.num_hidden_layers);
+        eprintln!(
+            "preloading {count}/{} layer(s)...",
+            model.config.num_hidden_layers
+        );
+        model.preload_layer_count_with_debug(count, false)?;
+    }
+
+    let mut failures = Vec::new();
+
+    for case in &fixtures.cases {
+        println!("case: {}", case.name);
+
+        let actual_token_ids = tok.encode(&case.prompt)?;
+        if actual_token_ids != case.token_ids {
+            failures.push(format!(
+                "{}: tokenizer ids differ\n  expected: {:?}\n  actual:   {:?}",
+                case.name, case.token_ids, actual_token_ids
+            ));
+            continue;
+        }
+        println!("  tokenizer: ok");
+
+        let input_ids: Vec<usize> = case.token_ids.iter().map(|id| *id as usize).collect();
+        let logits = model.first_next_token_logits(&input_ids)?;
+        let actual_top = top_logits(&logits, fixtures.top_n);
+        let expected_top = &case.first_token_top_logits[..fixtures.top_n];
+
+        for (rank, expected) in expected_top.iter().enumerate() {
+            let Some(actual_for_token) = logits.get(expected.token_id as usize) else {
+                failures.push(format!(
+                    "{}: expected logit token_id {} is outside vocab",
+                    case.name, expected.token_id
+                ));
+                continue;
+            };
+            if !logit_close(
+                *actual_for_token,
+                expected.logit,
+                fixtures.logit_atol,
+                fixtures.logit_rtol,
+            ) {
+                failures.push(format!(
+                    "{}: logit differs for token {} at expected rank {}\n  expected: {:.6}\n  actual:   {:.6}",
+                    case.name, expected.token_id, rank, expected.logit, actual_for_token
+                ));
+            }
+        }
+
+        if fixtures.require_top_token_ids {
+            for (rank, expected) in expected_top.iter().enumerate() {
+                if actual_top[rank].token_id != expected.token_id {
+                    failures.push(format!(
+                        "{}: top logit token differs at rank {}\n  expected token: {}\n  actual token:   {}",
+                        case.name, rank, expected.token_id, actual_top[rank].token_id
+                    ));
+                }
+            }
+        }
+        println!("  first-token logits: checked top {}", fixtures.top_n);
+
+        let output_ids = model.generate_greedy_reference(&input_ids, case.greedy.max_new_tokens)?;
+        let actual_generated: Vec<u32> = output_ids
+            .iter()
+            .skip(input_ids.len())
+            .map(|id| *id as u32)
+            .collect();
+
+        validate_generated_ids(case, &actual_generated, &mut failures);
+        println!(
+            "  greedy generation: checked {} token(s)",
+            actual_generated.len()
+        );
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "validation failed with {} issue(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    println!("validation passed: {} case(s)", fixtures.cases.len());
+    Ok(())
+}
+
+fn validate_fixture_completeness(fixtures: &ValidationFixtures) -> Result<()> {
+    let mut failures = Vec::new();
+
+    for case in &fixtures.cases {
+        if case.token_ids.is_empty() {
+            failures.push(format!("{}: token_ids fixture is empty", case.name));
+        }
+        if case.first_token_top_logits.len() < fixtures.top_n {
+            failures.push(format!(
+                "{}: first_token_top_logits has {} entries, expected at least top_n={}",
+                case.name,
+                case.first_token_top_logits.len(),
+                fixtures.top_n
+            ));
+        }
+        if case.greedy.temperature != 0.0 {
+            failures.push(format!(
+                "{}: greedy.temperature must be 0 for deterministic validation",
+                case.name
+            ));
+        }
+        if case.greedy.generated_ids.is_empty() && case.greedy.max_new_tokens > 0 {
+            failures.push(format!(
+                "{}: greedy.generated_ids fixture is empty",
+                case.name
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "fixtures are incomplete with {} issue(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    Ok(())
+}
+
+fn load_model_auto(model_dir: &str, weights: &str) -> Result<RawLlm> {
+    let layered_markers = [
+        "layerrun.json",
+        "embeddings.safetensors",
+        "final.safetensors",
+    ];
+    let is_layered = layered_markers
+        .iter()
+        .all(|marker| Path::new(model_dir).join(marker).exists());
+
+    if is_layered {
+        RawLlm::load_layered(model_dir)
+    } else {
+        RawLlm::load(model_dir, weights)
+    }
+}
+
+#[derive(Debug)]
+struct ActualLogit {
+    token_id: u32,
+    logit: f32,
+}
+
+fn top_logits(logits: &[f32], top_n: usize) -> Vec<ActualLogit> {
+    let mut top: Vec<ActualLogit> = logits
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(token_id, logit)| ActualLogit {
+            token_id: token_id as u32,
+            logit,
+        })
+        .collect();
+    top.sort_by(|a, b| b.logit.total_cmp(&a.logit));
+    top.truncate(top_n);
+    top
+}
+
+fn logit_close(actual: f32, expected: f32, atol: f32, rtol: f32) -> bool {
+    let diff = (actual - expected).abs();
+    diff <= atol + rtol * expected.abs()
+}
+
+fn validate_generated_ids(
+    case: &ValidationCase,
+    actual_generated: &[u32],
+    failures: &mut Vec<String>,
+) {
+    if actual_generated == case.greedy.generated_ids {
+        return;
+    }
+
+    let max_len = actual_generated.len().max(case.greedy.generated_ids.len());
+    for index in 0..max_len {
+        let expected = case.greedy.generated_ids.get(index).copied();
+        let actual = actual_generated.get(index).copied();
+        if expected == actual {
+            continue;
+        }
+
+        let explained = case.greedy.mismatches.iter().any(|mismatch| {
+            mismatch.position == index
+                && Some(mismatch.expected) == expected
+                && Some(mismatch.actual) == actual
+                && !mismatch.reason.trim().is_empty()
+        });
+
+        if !explained {
+            failures.push(format!(
+                "{}: generated token differs at position {}\n  expected: {:?}\n  actual:   {:?}",
+                case.name, index, expected, actual
+            ));
+        }
+    }
 }
 
 fn resolve_model_dir(

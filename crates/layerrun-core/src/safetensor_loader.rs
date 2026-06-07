@@ -186,6 +186,24 @@ fn alternate_tensor_name(name: &str) -> Option<String> {
         return Some(format!("model.language_model.embed_tokens.{suffix}"));
     }
 
+    if let Some(suffix) = name.strip_prefix("model.embed_tokens_per_layer.") {
+        return Some(format!(
+            "model.language_model.embed_tokens_per_layer.{suffix}"
+        ));
+    }
+
+    if let Some(suffix) = name.strip_prefix("model.per_layer_model_projection.") {
+        return Some(format!(
+            "model.language_model.per_layer_model_projection.{suffix}"
+        ));
+    }
+
+    if let Some(suffix) = name.strip_prefix("model.per_layer_projection_norm.") {
+        return Some(format!(
+            "model.language_model.per_layer_projection_norm.{suffix}"
+        ));
+    }
+
     if let Some(suffix) = name.strip_prefix("model.norm.") {
         return Some(format!("model.language_model.norm.{suffix}"));
     }

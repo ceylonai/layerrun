@@ -87,6 +87,12 @@ pub fn optimize_single_safetensors(
         |name| {
             name.starts_with("model.embed_tokens.")
                 || name.starts_with("model.language_model.embed_tokens.")
+                || name.starts_with("model.embed_tokens_per_layer.")
+                || name.starts_with("model.language_model.embed_tokens_per_layer.")
+                || name.starts_with("model.per_layer_model_projection.")
+                || name.starts_with("model.language_model.per_layer_model_projection.")
+                || name.starts_with("model.per_layer_projection_norm.")
+                || name.starts_with("model.language_model.per_layer_projection_norm.")
         },
     )?;
 

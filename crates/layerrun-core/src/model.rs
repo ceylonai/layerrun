@@ -1,9 +1,12 @@
 use crate::{
     backend::{Backend, BackendKind, BackendOps},
-    config::ModelConfig,
+    config::{ModelConfig, ModelFamily},
     kv_cache::KvCache,
     layer_store::LayerStore,
-    ops::{apply_llama_rope_all_heads, apply_rope_all_heads, argmax, embed_token, softcap_vec},
+    ops::{
+        apply_llama_rope_all_heads, apply_llama_rope_one_head, apply_rope_all_heads, argmax,
+        embed_token, softcap_vec,
+    },
     safetensor_loader::SafeTensorSource,
     tensor::Tensor,
     weights::DecoderLayerWeights,
@@ -21,6 +24,8 @@ pub struct RawLlm {
 
     pub embed_tokens: Tensor,
     pub embed_tokens_per_layer: Option<Tensor>,
+    pub per_layer_model_projection: Option<Tensor>,
+    pub per_layer_projection_norm: Option<Tensor>,
     pub final_norm: Tensor,
     pub lm_head: Tensor,
 }
@@ -63,6 +68,8 @@ impl RawLlm {
         )?;
         let embed_tokens_per_layer =
             load_embeddings_per_layer_from_source(&safetensor_source, &config)?;
+        let (per_layer_model_projection, per_layer_projection_norm) =
+            load_per_layer_projection_from_source(&safetensor_source, &config)?;
         let final_norm = safetensor_source.tensor_f32("model.norm.weight")?;
 
         let lm_head = match safetensor_source
@@ -83,6 +90,8 @@ impl RawLlm {
             preloaded_layers: Vec::new(),
             embed_tokens,
             embed_tokens_per_layer,
+            per_layer_model_projection,
+            per_layer_projection_norm,
             final_norm,
             lm_head,
         })
@@ -96,6 +105,8 @@ impl RawLlm {
 
         let embed_tokens = layer_store.load_embeddings(&config)?;
         let embed_tokens_per_layer = layer_store.load_embeddings_per_layer(&config)?;
+        let (per_layer_model_projection, per_layer_projection_norm) =
+            layer_store.load_per_layer_projection(&config)?;
         let final_norm = layer_store.load_final_norm()?;
         let lm_head = layer_store.load_lm_head(&config)?;
 
@@ -107,6 +118,8 @@ impl RawLlm {
             preloaded_layers: Vec::new(),
             embed_tokens,
             embed_tokens_per_layer,
+            per_layer_model_projection,
+            per_layer_projection_norm,
             final_norm,
             lm_head,
         })
@@ -197,13 +210,13 @@ impl RawLlm {
         }
 
         let mut hidden = embed_token(&self.embed_tokens, token_id)?;
-        if self.config.family() == crate::config::ModelFamily::Gemma4 {
+        if self.config.family() == ModelFamily::Gemma4 {
             let scale = (self.config.hidden_size as f32).sqrt();
             for value in &mut hidden {
                 *value *= scale;
             }
         }
-        let per_layer_inputs = self.per_layer_inputs_for_token(token_id)?;
+        let per_layer_inputs = self.per_layer_inputs_for_token(token_id, &hidden)?;
 
         for layer_id in 0..self.config.num_hidden_layers {
             if let Some(Some(layer_weights)) = self.preloaded_layers.get(layer_id) {
@@ -212,6 +225,8 @@ impl RawLlm {
                 }
 
                 let run_started = Instant::now();
+                let shared_attention_cache =
+                    shared_kv_cache(&self.config, layer_id, layer_caches).cloned();
                 hidden = decoder_layer_forward(
                     &hidden,
                     layer_weights,
@@ -219,6 +234,7 @@ impl RawLlm {
                     layer_id,
                     per_layer_inputs.as_deref(),
                     &mut layer_caches[layer_id],
+                    shared_attention_cache.as_ref(),
                     &self.backend,
                 )?;
                 let run_elapsed = run_started.elapsed();
@@ -237,6 +253,8 @@ impl RawLlm {
                 let load_elapsed = load_started.elapsed();
 
                 let run_started = Instant::now();
+                let shared_attention_cache =
+                    shared_kv_cache(&self.config, layer_id, layer_caches).cloned();
                 hidden = decoder_layer_forward(
                     &hidden,
                     &layer_weights,
@@ -244,6 +262,7 @@ impl RawLlm {
                     layer_id,
                     per_layer_inputs.as_deref(),
                     &mut layer_caches[layer_id],
+                    shared_attention_cache.as_ref(),
                     &self.backend,
                 )?;
                 let run_elapsed = run_started.elapsed();
@@ -278,6 +297,61 @@ impl RawLlm {
         max_new_tokens: usize,
     ) -> Result<Vec<usize>> {
         self.generate_greedy_with_debug(input_ids, max_new_tokens, false)
+    }
+
+    pub fn first_next_token_logits(&self, input_ids: &[usize]) -> Result<Vec<f32>> {
+        if input_ids.is_empty() {
+            anyhow::bail!("input_ids is empty");
+        }
+
+        let mut layer_caches: Vec<KvCache> = (0..self.config.num_hidden_layers)
+            .map(|_| KvCache::new())
+            .collect();
+
+        if input_ids.len() > 1 {
+            for &token in &input_ids[..input_ids.len() - 1] {
+                let _ = self.forward_one_token(token, &mut layer_caches)?;
+            }
+        }
+
+        self.forward_one_token(*input_ids.last().unwrap(), &mut layer_caches)
+    }
+
+    pub fn generate_greedy_reference(
+        &self,
+        input_ids: &[usize],
+        max_new_tokens: usize,
+    ) -> Result<Vec<usize>> {
+        if input_ids.is_empty() {
+            anyhow::bail!("input_ids is empty");
+        }
+
+        let mut out = input_ids.to_vec();
+        let stop_ids = self.config.eos_token_ids();
+        let mut layer_caches: Vec<KvCache> = (0..self.config.num_hidden_layers)
+            .map(|_| KvCache::new())
+            .collect();
+
+        if input_ids.len() > 1 {
+            for &token in &input_ids[..input_ids.len() - 1] {
+                let _ = self.forward_one_token(token, &mut layer_caches)?;
+            }
+        }
+
+        let mut current = *input_ids.last().unwrap();
+        for _ in 0..max_new_tokens {
+            let logits = self.forward_one_token(current, &mut layer_caches)?;
+            let next = argmax(&logits);
+            out.push(next);
+
+            if stop_ids.contains(&next) {
+                break;
+            }
+
+            current = next;
+        }
+
+        Ok(out)
     }
 
     pub fn generate_greedy_with_debug(
@@ -363,14 +437,7 @@ impl RawLlm {
             }
 
             let step_started = Instant::now();
-            let mut logits =
-                self.forward_one_token_with_debug(current, &mut layer_caches, debug)?;
-
-            for &old_token in &out {
-                if old_token < logits.len() {
-                    logits[old_token] -= 1.2;
-                }
-            }
+            let logits = self.forward_one_token_with_debug(current, &mut layer_caches, debug)?;
 
             let next = sample_next_token(&logits, sampling);
             let next_logit = logits[next];
@@ -430,21 +497,73 @@ impl RawLlm {
         DecoderLayerWeights::load_from_source(safetensor_source, &self.config, layer_id)
     }
 
-    fn per_layer_inputs_for_token(&self, token_id: usize) -> Result<Option<Vec<f32>>> {
-        let Some(embed_tokens_per_layer) = &self.embed_tokens_per_layer else {
+    fn per_layer_inputs_for_token(
+        &self,
+        token_id: usize,
+        input_embed: &[f32],
+    ) -> Result<Option<Vec<f32>>> {
+        let Some(hidden_size_per_layer_input) = self.config.hidden_size_per_layer_input else {
             return Ok(None);
         };
 
-        let mut row = embed_token(embed_tokens_per_layer, token_id)?;
-
-        if let Some(hidden_size_per_layer_input) = self.config.hidden_size_per_layer_input {
-            let scale = (hidden_size_per_layer_input as f32).sqrt();
-            for value in &mut row {
-                *value *= scale;
+        let packed_hidden = self.config.num_hidden_layers * hidden_size_per_layer_input;
+        let mut token_identity = match &self.embed_tokens_per_layer {
+            Some(embed_tokens_per_layer) if token_id < embed_tokens_per_layer.rows() => {
+                let mut row = embed_token(embed_tokens_per_layer, token_id)?;
+                let scale = (hidden_size_per_layer_input as f32).sqrt();
+                for value in &mut row {
+                    *value *= scale;
+                }
+                Some(row)
             }
-        }
+            _ => None,
+        };
 
-        Ok(Some(row))
+        let context_aware = match (
+            &self.per_layer_model_projection,
+            &self.per_layer_projection_norm,
+        ) {
+            (Some(projection), Some(norm)) => {
+                let mut projected = self.backend.linear_out_in(input_embed, projection, None)?;
+                let scale = 1.0 / (self.config.hidden_size as f32).sqrt();
+                for value in &mut projected {
+                    *value *= scale;
+                }
+
+                if projected.len() != packed_hidden {
+                    anyhow::bail!(
+                        "per-layer projection output mismatch: got {}, expected {}",
+                        projected.len(),
+                        packed_hidden
+                    );
+                }
+
+                let mut normalized = Vec::with_capacity(projected.len());
+                for layer_id in 0..self.config.num_hidden_layers {
+                    let start = layer_id * hidden_size_per_layer_input;
+                    let end = start + hidden_size_per_layer_input;
+                    let layer_normed =
+                        model_rms_norm(&projected[start..end], norm, &self.config, &self.backend)?;
+                    normalized.extend(layer_normed);
+                }
+
+                Some(normalized)
+            }
+            _ => None,
+        };
+
+        match (token_identity.as_mut(), context_aware) {
+            (Some(token_identity), Some(context_aware)) => {
+                let scale = std::f32::consts::FRAC_1_SQRT_2;
+                for (token_value, context_value) in token_identity.iter_mut().zip(context_aware) {
+                    *token_value = (*token_value + context_value) * scale;
+                }
+                Ok(Some(std::mem::take(token_identity)))
+            }
+            (Some(token_identity), None) => Ok(Some(std::mem::take(token_identity))),
+            (None, Some(context_aware)) => Ok(Some(context_aware)),
+            (None, None) => Ok(None),
+        }
     }
 }
 
@@ -511,11 +630,20 @@ pub fn decoder_layer_forward(
     layer_id: usize,
     per_layer_inputs: Option<&[f32]>,
     cache: &mut KvCache,
+    shared_attention_cache: Option<&KvCache>,
     backend: &dyn BackendOps,
 ) -> Result<Vec<f32>> {
     let normed = model_rms_norm(hidden, &weights.input_layernorm, cfg, backend)?;
 
-    let attn = attention_forward(&normed, weights, cfg, layer_id, cache, backend)?;
+    let attn = attention_forward(
+        &normed,
+        weights,
+        cfg,
+        layer_id,
+        cache,
+        shared_attention_cache,
+        backend,
+    )?;
 
     let uses_post_residual_norms =
         weights.pre_feedforward_layernorm.is_some() || weights.post_feedforward_layernorm.is_some();
@@ -624,6 +752,7 @@ pub fn attention_forward(
     cfg: &ModelConfig,
     layer_id: usize,
     cache: &mut KvCache,
+    shared_attention_cache: Option<&KvCache>,
     backend: &dyn BackendOps,
 ) -> Result<Vec<f32>> {
     let mut q = backend.linear_out_in(x, &w.q_proj, w.q_proj_bias.as_ref())?;
@@ -681,7 +810,7 @@ pub fn attention_forward(
         k = k_normed;
     }
 
-    if cfg.family() == crate::config::ModelFamily::Gemma4 {
+    if cfg.family() == ModelFamily::Gemma4 {
         let mut v_normed = vec![0.0f32; v.len()];
 
         for h in 0..num_kv_heads {
@@ -715,10 +844,15 @@ pub fn attention_forward(
         );
     }
 
-    let position = cache.position();
+    let position = shared_attention_cache
+        .map(|cache| cache.len().saturating_sub(1))
+        .unwrap_or_else(|| cache.position());
     let theta = cfg.layer_rope_theta(layer_id);
 
-    if cfg.is_llama_like() {
+    if cfg.family() == ModelFamily::Gemma4 {
+        apply_gemma4_rope_all_heads(&mut q, position, num_q_heads, head_dim, cfg, layer_id);
+        apply_gemma4_rope_all_heads(&mut k, position, num_kv_heads, head_dim, cfg, layer_id);
+    } else if cfg.is_llama_like() {
         apply_llama_rope_all_heads(&mut q, position, num_q_heads, head_dim, theta);
         apply_llama_rope_all_heads(&mut k, position, num_kv_heads, head_dim, theta);
     } else {
@@ -726,7 +860,11 @@ pub fn attention_forward(
         apply_rope_all_heads(&mut k, position, num_kv_heads, head_dim, theta);
     }
 
-    cache.push(k, v);
+    if shared_attention_cache.is_none() {
+        cache.push(k, v);
+    }
+
+    let attention_cache = shared_attention_cache.unwrap_or(cache);
 
     let groups = num_q_heads / num_kv_heads;
 
@@ -742,21 +880,26 @@ pub fn attention_forward(
         let q_end = q_start + head_dim;
         let qh = &q[q_start..q_end];
 
-        let mut scores = Vec::with_capacity(cache.len());
+        let mut scores = Vec::with_capacity(attention_cache.len());
 
         let attention_start = cfg
-            .attention_window()
-            .map(|window| cache.len().saturating_sub(window))
+            .layer_attention_window(layer_id)
+            .map(|window| attention_cache.len().saturating_sub(window))
             .unwrap_or(0);
 
-        for past_k in &cache.keys[attention_start..] {
+        for past_k in &attention_cache.keys[attention_start..] {
             let k_start = kv_h * head_dim;
             let k_end = k_start + head_dim;
             let kh = &past_k[k_start..k_end];
 
             let dot = qh.iter().zip(kh.iter()).map(|(a, b)| a * b).sum::<f32>();
 
-            scores.push(dot / (head_dim as f32).sqrt());
+            let scale = if cfg.family() == ModelFamily::Gemma4 {
+                1.0
+            } else {
+                1.0 / (head_dim as f32).sqrt()
+            };
+            scores.push(dot * scale);
         }
 
         let probs = backend.softmax(&scores);
@@ -766,7 +909,7 @@ pub fn attention_forward(
             let t = attention_start + offset;
             let v_start = kv_h * head_dim;
             let v_end = v_start + head_dim;
-            let vh = &cache.values[t][v_start..v_end];
+            let vh = &attention_cache.values[t][v_start..v_end];
 
             for i in 0..head_dim {
                 head_out[i] += p * vh[i];
@@ -782,6 +925,36 @@ pub fn attention_forward(
     let out = backend.linear_out_in(&context, &w.o_proj, w.o_proj_bias.as_ref())?;
 
     Ok(out)
+}
+
+fn shared_kv_cache<'a>(
+    cfg: &ModelConfig,
+    layer_id: usize,
+    layer_caches: &'a [KvCache],
+) -> Option<&'a KvCache> {
+    let source_layer = cfg.gemma4_shared_kv_source_layer(layer_id)?;
+    layer_caches.get(source_layer)
+}
+
+fn apply_gemma4_rope_all_heads(
+    x: &mut [f32],
+    position: usize,
+    num_heads: usize,
+    head_dim: usize,
+    cfg: &ModelConfig,
+    layer_id: usize,
+) {
+    let theta = cfg.layer_rope_theta(layer_id);
+    let rotary_dim = cfg.layer_rotary_dim(layer_id);
+
+    for h in 0..num_heads {
+        let start = h * head_dim;
+        let end = start + rotary_dim;
+
+        if end <= x.len() {
+            apply_llama_rope_one_head(&mut x[start..end], position, rotary_dim, theta);
+        }
+    }
 }
 
 fn model_rms_norm(
@@ -813,4 +986,26 @@ fn load_embeddings_per_layer_from_source(
         Ok(tensor) => Ok(Some(tensor)),
         Err(_) => Ok(None),
     }
+}
+
+fn load_per_layer_projection_from_source(
+    source: &SafeTensorSource,
+    config: &ModelConfig,
+) -> Result<(Option<Tensor>, Option<Tensor>)> {
+    let Some(hidden_size_per_layer_input) = config.hidden_size_per_layer_input else {
+        return Ok((None, None));
+    };
+
+    let packed_hidden = config.num_hidden_layers * hidden_size_per_layer_input;
+    let projection = source
+        .tensor_f32_or_gemma_qat(
+            "model.per_layer_model_projection.weight",
+            &[packed_hidden, config.hidden_size],
+        )
+        .ok();
+    let norm = source
+        .tensor_f32("model.per_layer_projection_norm.weight")
+        .ok();
+
+    Ok((projection, norm))
 }

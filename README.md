@@ -158,6 +158,8 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
+Chat requests are rendered with the loaded model's chat template before tokenization. LayerRun reads template metadata from tokenizer/config files when available, has explicit Gemma 4 instruct formatting support, and only uses the plain fallback format for base or unknown models. Gemma 4 chat prompts use the model's turn tokens, map assistant messages to Gemma's `model` role, and preserve `system`, `user`, `assistant`, and `developer` roles.
+
 OpenAI SDK-compatible clients can use `http://127.0.0.1:8080/v1` as the base URL. Streaming responses are not supported yet; send non-streaming requests.
 
 `temperature`, `top_k`, and `top_p` are supported on `/v1/completions` and `/v1/chat/completions`. The default temperature is `0`, which keeps deterministic greedy generation. When `temperature` is above `0`, the server defaults to `top_k: 40` to avoid sampling low-quality tail tokens. You can override it explicitly.
@@ -428,6 +430,50 @@ Options:
 - `--preload-layers`: load all per-layer weights before generation.
 - `--preload-layer-count <N>`: load only the first `N` per-layer weights before generation. Cannot be combined with `--preload-layers`.
 - `--backend <BACKEND>`: runtime backend, either `cpu` or `mlx`. Defaults to `cpu`.
+
+## validate
+
+Validate LayerRun tokenizer output, first-token logits, and short greedy generation against reference fixtures generated from a trusted runtime such as Hugging Face Transformers:
+
+```sh
+cargo run -p layerrun-cli -- validate \
+  --model-dir models/gemma-4-E4B-it-qat-mobile-transformers \
+  --fixtures fixtures/gemma.json
+```
+
+`validate` auto-detects LayerRun layered model directories and also supports non-layered safetensors model directories with `--weights`.
+
+Fixture files contain:
+
+- reference runtime metadata
+- fixed prompts
+- expected tokenizer token ids
+- expected first-token top-N logits
+- expected greedy generated ids for `temperature: 0`
+- optional explanations for known generated-id mismatches
+
+Generate or refresh fixtures from a Transformers-readable reference model directory:
+
+```sh
+python3 scripts/generate_validation_fixture.py \
+  --model-dir /path/to/transformers/model \
+  --output fixtures/gemma.json \
+  --prompt "Hello" \
+  --prompt "The capital of France is" \
+  --max-new-tokens 4 \
+  --top-n 10
+```
+
+The fixture generator requires Python packages for `torch` and `transformers`. The checked-in `fixtures/gemma.json` pins prompt/token-id cases and should be regenerated with reference logits and generated ids before using it as a passing correctness gate.
+
+Options:
+
+- `--model-dir <MODEL_DIR>`: LayerRun or standard model directory.
+- `--fixtures <FIXTURES>`: validation fixture JSON file.
+- `--weights <WEIGHTS>`: safetensors filename for non-layered model directories. Defaults to `model.safetensors`.
+- `--backend <BACKEND>`: runtime backend, either `cpu` or `mlx`. Defaults to `cpu`.
+- `--preload-layers`: load all per-layer weights before validation.
+- `--preload-layer-count <N>`: load only the first `N` per-layer weights before validation. Cannot be combined with `--preload-layers`.
 
 ## Hugging Face Cache
 

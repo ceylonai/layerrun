@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod chat_template;
 pub mod config;
 pub mod huggingface;
 mod kv_cache;
