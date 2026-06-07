@@ -6,6 +6,7 @@ use layerrun_core::huggingface::HuggingFaceSource;
 use layerrun_core::model::{RawLlm, SamplingConfig};
 use layerrun_core::safetensor_loader::SafeTensorFile;
 use layerrun_core::tokenizer_wrap::LayerTokenizer;
+use layerrun_server::ServeConfig;
 use serde::Deserialize;
 use std::{fs, io::Write, path::Path, path::PathBuf, time::Instant};
 
@@ -187,9 +188,77 @@ enum Commands {
         #[arg(long, conflicts_with = "preload_layers")]
         preload_layer_count: Option<usize>,
     },
+
+    /// Serve models through the OpenAI-compatible HTTP API.
+    Serve {
+        /// Address to bind.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to bind.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+
+        /// Directory containing local model directories to serve.
+        #[arg(long, default_value = "models")]
+        models_dir: String,
+
+        /// Public model id returned by /v1/models and accepted in requests.
+        #[arg(long)]
+        model_id: Option<String>,
+
+        /// Additional local model directory to register.
+        #[arg(long)]
+        model_dir: Option<String>,
+
+        /// Hugging Face repo id, for example meta-llama/Llama-3.2-1B-Instruct.
+        #[arg(long)]
+        hf_repo: Option<String>,
+
+        /// Hugging Face revision, branch, or commit.
+        #[arg(long)]
+        hf_revision: Option<String>,
+
+        /// Hugging Face token. If omitted, HF_TOKEN is used when present.
+        #[arg(long)]
+        hf_token: Option<String>,
+
+        /// Directory for cached Hugging Face files.
+        #[arg(long)]
+        hf_cache_dir: Option<PathBuf>,
+
+        /// Name of the safetensors file inside model_dir for non-layered models.
+        #[arg(long, default_value = "model.safetensors")]
+        weights: String,
+
+        /// Load a LayerRun optimized per-layer model directory.
+        #[arg(long)]
+        layered: bool,
+
+        /// Preload all per-layer weight files before serving.
+        #[arg(long)]
+        preload_layers: bool,
+
+        /// Preload the first N per-layer weight files before serving.
+        #[arg(long, conflicts_with = "preload_layers")]
+        preload_layer_count: Option<usize>,
+
+        /// Runtime backend to use for generation.
+        #[arg(long, default_value_t = BackendKind::Cpu)]
+        backend: BackendKind,
+
+        /// Print model execution debug logs during requests.
+        #[arg(long)]
+        debug: bool,
+
+        /// Log full prompts and generated text for completion requests.
+        #[arg(long)]
+        log_completions: bool,
+    },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -407,6 +476,45 @@ fn main() -> Result<()> {
                 preload_layers,
                 preload_layer_count,
             )?;
+        }
+
+        Commands::Serve {
+            host,
+            port,
+            models_dir,
+            model_id,
+            model_dir,
+            hf_repo,
+            hf_revision,
+            hf_token,
+            hf_cache_dir,
+            weights,
+            layered,
+            preload_layers,
+            preload_layer_count,
+            backend,
+            debug,
+            log_completions,
+        } => {
+            layerrun_server::serve(ServeConfig {
+                host,
+                port,
+                models_dir,
+                model_id,
+                model_dir,
+                hf_repo,
+                hf_revision,
+                hf_token,
+                hf_cache_dir,
+                weights,
+                layered,
+                preload_layers,
+                preload_layer_count,
+                backend,
+                debug,
+                log_completions,
+            })
+            .await?;
         }
     }
 

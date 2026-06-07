@@ -105,6 +105,49 @@ struct Cli {
     log_completions: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ServeConfig {
+    pub host: String,
+    pub port: u16,
+    pub models_dir: String,
+    pub model_id: Option<String>,
+    pub model_dir: Option<String>,
+    pub hf_repo: Option<String>,
+    pub hf_revision: Option<String>,
+    pub hf_token: Option<String>,
+    pub hf_cache_dir: Option<PathBuf>,
+    pub weights: String,
+    pub layered: bool,
+    pub preload_layers: bool,
+    pub preload_layer_count: Option<usize>,
+    pub backend: BackendKind,
+    pub debug: bool,
+    pub log_completions: bool,
+}
+
+impl From<Cli> for ServeConfig {
+    fn from(cli: Cli) -> Self {
+        Self {
+            host: cli.host,
+            port: cli.port,
+            models_dir: cli.models_dir,
+            model_id: cli.model_id,
+            model_dir: cli.model_dir,
+            hf_repo: cli.hf_repo,
+            hf_revision: cli.hf_revision,
+            hf_token: cli.hf_token,
+            hf_cache_dir: cli.hf_cache_dir,
+            weights: cli.weights,
+            layered: cli.layered,
+            preload_layers: cli.preload_layers,
+            preload_layer_count: cli.preload_layer_count,
+            backend: cli.backend,
+            debug: cli.debug,
+            log_completions: cli.log_completions,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     catalog: Arc<ModelCatalog>,
@@ -148,13 +191,17 @@ struct LoadedModel {
 }
 
 #[tokio::main]
+#[allow(dead_code)]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let catalog = build_catalog(&cli)?;
+    serve(Cli::parse().into()).await
+}
+
+pub async fn serve(config: ServeConfig) -> Result<()> {
+    let catalog = build_catalog(&config)?;
     if catalog.specs.is_empty() {
         anyhow::bail!(
             "no models found; pass --model-dir/--hf-repo or add model directories under {}",
-            cli.models_dir
+            config.models_dir
         );
     }
     eprintln!("available models:");
@@ -164,8 +211,8 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         catalog: Arc::new(catalog),
-        debug: cli.debug,
-        log_completions: cli.log_completions,
+        debug: config.debug,
+        log_completions: config.log_completions,
     };
 
     let app = Router::new()
@@ -178,9 +225,9 @@ async fn main() -> Result<()> {
         .route("/api/ps", get(ollama_ps))
         .with_state(state);
 
-    let addr: SocketAddr = format!("{}:{}", cli.host, cli.port)
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
-        .with_context(|| format!("invalid bind address {}:{}", cli.host, cli.port))?;
+        .with_context(|| format!("invalid bind address {}:{}", config.host, config.port))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("serving OpenAI-compatible API at http://{addr}");
     axum::serve(listener, app).await?;
@@ -987,56 +1034,59 @@ fn validate_sampling(
     })
 }
 
-fn build_catalog(cli: &Cli) -> Result<ModelCatalog> {
+fn build_catalog(config: &ServeConfig) -> Result<ModelCatalog> {
     let mut specs = Vec::new();
-    let catalog_preload_layer_count = catalog_preload_layer_count(cli);
+    let catalog_preload_layer_count = catalog_preload_layer_count(config);
     discover_local_models(
-        &cli.models_dir,
-        cli.backend,
+        &config.models_dir,
+        config.backend,
         catalog_preload_layer_count,
         &mut specs,
     )?;
 
-    match (&cli.model_dir, &cli.hf_repo) {
+    match (&config.model_dir, &config.hf_repo) {
         (Some(model_dir), None) => {
-            let id = cli
+            let id = config
                 .model_id
                 .clone()
                 .or_else(|| model_dir_name(model_dir))
                 .unwrap_or_else(|| "layerrun".to_string());
-            let preload_layer_count =
-                preload_layer_count(cli.layered, cli.preload_layers, cli.preload_layer_count)?;
+            let preload_layer_count = preload_layer_count(
+                config.layered,
+                config.preload_layers,
+                config.preload_layer_count,
+            )?;
             push_unique(
                 &mut specs,
                 ModelSpec {
                     id,
                     source: ModelSource::Local {
                         model_dir: model_dir.clone(),
-                        weights: cli.weights.clone(),
-                        layered: cli.layered,
+                        weights: config.weights.clone(),
+                        layered: config.layered,
                     },
-                    backend: cli.backend,
+                    backend: config.backend,
                     preload_layer_count,
                 },
             );
         }
         (None, Some(hf_repo)) => {
-            if cli.layered {
+            if config.layered {
                 anyhow::bail!("--layered is only supported with local --model-dir models");
             }
-            let id = cli.model_id.clone().unwrap_or_else(|| hf_repo.clone());
+            let id = config.model_id.clone().unwrap_or_else(|| hf_repo.clone());
             push_unique(
                 &mut specs,
                 ModelSpec {
                     id,
                     source: ModelSource::HuggingFace {
                         repo: hf_repo.clone(),
-                        revision: cli.hf_revision.clone(),
-                        token: cli.hf_token.clone(),
-                        cache_dir: cli.hf_cache_dir.clone(),
-                        weights: cli.weights.clone(),
+                        revision: config.hf_revision.clone(),
+                        token: config.hf_token.clone(),
+                        cache_dir: config.hf_cache_dir.clone(),
+                        weights: config.weights.clone(),
                     },
-                    backend: cli.backend,
+                    backend: config.backend,
                     preload_layer_count: None,
                 },
             );
@@ -1146,9 +1196,9 @@ fn preload_layer_count(
     }
 }
 
-fn catalog_preload_layer_count(cli: &Cli) -> Option<usize> {
-    if cli.preload_layers || cli.preload_layer_count.is_some() {
-        Some(cli.preload_layer_count.unwrap_or(usize::MAX))
+fn catalog_preload_layer_count(config: &ServeConfig) -> Option<usize> {
+    if config.preload_layers || config.preload_layer_count.is_some() {
+        Some(config.preload_layer_count.unwrap_or(usize::MAX))
     } else {
         None
     }

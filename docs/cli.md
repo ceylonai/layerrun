@@ -209,7 +209,56 @@ cargo run --release -p layerrun-cli -- generate-layered \
 
 ---
 
-### 7. `validate`
+### 7. `serve`
+
+Starts the OpenAI-compatible and Ollama-style HTTP server from the CLI package.
+
+#### Usage
+```sh
+cargo run --release -p layerrun-cli -- serve [options]
+```
+
+#### Options
+* `--host <HOST>`: IP address to bind (default: `127.0.0.1`).
+* `--port <PORT>`: Port to bind (default: `8080`).
+* `--models-dir <MODELS_DIR>`: Folder containing local models to automatically discover (default: `models`).
+* `--model-id <MODEL_ID>`: Public model ID returned by `/v1/models` and used in request payloads.
+* `--model-dir <MODEL_DIR>`: Path to an individual model directory to register.
+* `--hf-repo <HF_REPO>`: Hugging Face repository ID.
+* `--hf-revision <HF_REVISION>`: Hugging Face revision/commit hash.
+* `--hf-token <HF_TOKEN>`: Hugging Face API token.
+* `--hf-cache-dir <HF_CACHE_DIR>`: Custom Hugging Face cache directory.
+* `--weights <WEIGHTS>`: Filename for weights inside the model directory (default: `model.safetensors`).
+* `--layered`: Loads the model as an optimized per-layer directory structure.
+* `--preload-layers`: Preload all per-layer weight files before serving.
+* `--preload-layer-count <N>`: Preload only the first `N` layer weight files before serving. *(Conflicts with `--preload-layers`)*
+* `--backend <BACKEND>`: Compute backend, either `cpu` or `mlx` (default: `cpu`).
+* `--debug`: Prints step-by-step model execution information during inference.
+* `--log-completions`: Outputs full prompt and generated output to `stderr`.
+
+#### Example
+```sh
+cargo run --release -p layerrun-cli -- serve \
+  --model-dir models/gemma-4-E4B-it-qat-mobile-transformers \
+  --model-id gemma \
+  --port 8080
+```
+
+#### Streaming Example
+```sh
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gemma",
+    "messages": [{"role": "user", "content": "Write a short greeting"}],
+    "max_tokens": 32,
+    "stream": true
+  }'
+```
+
+---
+
+### 8. `validate`
 
 Validates LayerRun's tokenizer outputs, first-token logits, and short greedy generations against a reference JSON fixture generated from a trusted runtime (like Hugging Face Transformers).
 

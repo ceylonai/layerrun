@@ -968,8 +968,10 @@ dependencies = [
  "anyhow",
  "clap",
  "layerrun-core",
+ "layerrun-server",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
