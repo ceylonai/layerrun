@@ -6,7 +6,7 @@ The workspace contains:
 
 - `layerrun-core`: shared model, tokenizer, safetensors, optimizer, and Hugging Face helpers.
 - `layerrun-cli`: command-line tools for inspecting, probing, optimizing, and generating.
-- `layerrun-server`: current server crate stub.
+- `layerrun-server`: OpenAI-compatible server with an Ollama-style local model catalog.
 
 ## Requirements
 
@@ -48,7 +48,7 @@ sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 xcrun -find metal
 ```
 
-Run the server stub:
+Run the OpenAI-compatible server:
 
 ```sh
 cargo run -p layerrun-server
@@ -70,6 +70,153 @@ Available commands:
 - `generate`: run the raw model generation path.
 - `optimize`: create a LayerRun directory with embeddings, per-layer files, and final weights.
 - `generate-layered`: generate from a LayerRun per-layer model directory.
+
+## Server Mode
+
+By default, the server scans `models/` for local model directories and exposes them through both OpenAI-compatible and Ollama-style model-list endpoints. Models are loaded lazily the first time a generation request uses them.
+
+Serve every discoverable model under `models/`:
+
+```sh
+cargo run -p layerrun-server
+```
+
+Serve models from a different local catalog directory:
+
+```sh
+cargo run -p layerrun-server -- \
+  --models-dir /path/to/models
+```
+
+Also register a specific local single-file safetensors model:
+
+```sh
+cargo run -p layerrun-server -- \
+  --model-dir models/qwen \
+  --model-id qwen
+```
+
+Also register a specific LayerRun optimized per-layer model:
+
+```sh
+cargo run -p layerrun-server -- \
+  --model-dir models/qwen-layered \
+  --layered \
+  --model-id qwen-layered
+```
+
+Serve a Hugging Face model after resolving it into the LayerRun cache:
+
+```sh
+cargo run -p layerrun-server -- \
+  --hf-repo meta-llama/Llama-3.2-1B-Instruct \
+  --model-id llama-3.2-1b-instruct
+```
+
+The server listens on `127.0.0.1:8080` by default. Override this with `--host` and `--port`.
+
+Available endpoints:
+
+- `GET /health`
+- `GET /v1/models`
+- `POST /v1/completions`
+- `POST /v1/chat/completions`
+- `GET /api/tags`
+- `POST /api/show`
+- `GET /api/ps`
+
+`/api/tags`, `/api/show`, and `/api/ps` follow Ollama's model-management shape closely enough for local catalog inspection. Generation still goes through the OpenAI-compatible endpoints. When multiple models are available, requests must include a `model` field.
+
+Example completion request:
+
+```sh
+curl http://127.0.0.1:8080/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gemma-4-E4B-it-qat-mobile-transformers",
+    "prompt": "Write a short greeting",
+    "max_tokens": 8
+  }'
+```
+
+Example chat completion request:
+
+```sh
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gemma-4-E4B-it-qat-mobile-transformers",
+    "messages": [
+      { "role": "system", "content": "You are concise." },
+      { "role": "user", "content": "Write a short greeting" }
+    ],
+    "max_tokens": 8
+  }'
+```
+
+OpenAI SDK-compatible clients can use `http://127.0.0.1:8080/v1` as the base URL. Streaming responses are not supported yet; send non-streaming requests.
+
+Completion logs are printed to stderr. Every generation request emits live progress lines for request start, model load, tokenization, generation, decoding, and request completion, plus a summary with endpoint, model, token counts, finish reason, and elapsed time. To include the full prompt and generated output in the server log, start the server with:
+
+```sh
+cargo run -p layerrun-server -- --log-completions
+```
+
+For faster generation, use a release build and preload layered model files so they are not paged from disk during each generated token:
+
+```sh
+cargo run --release -p layerrun-server -- --preload-layers
+```
+
+For lower memory usage, preload only the first N layers:
+
+```sh
+cargo run --release -p layerrun-server -- --preload-layer-count 8
+```
+
+Inspect the local catalog:
+
+```sh
+curl http://127.0.0.1:8080/v1/models
+curl http://127.0.0.1:8080/api/tags
+curl http://127.0.0.1:8080/api/ps
+```
+
+Show model metadata:
+
+```sh
+curl http://127.0.0.1:8080/api/show \
+  -H 'Content-Type: application/json' \
+  -d '{ "model": "gemma-4-E4B-it-qat-mobile-transformers" }'
+```
+
+JavaScript client example:
+
+```sh
+node examples/js-client.mjs models
+node examples/js-client.mjs tags
+node examples/js-client.mjs chat gemma-4-E4B-it-qat-mobile-transformers "Write a short greeting"
+LAYERRUN_MODEL=gemma-4-E4B-it-qat-mobile-transformers node examples/js-client.mjs complete "Hello"
+```
+
+Server options:
+
+- `--host <HOST>`: bind address. Defaults to `127.0.0.1`.
+- `--port <PORT>`: bind port. Defaults to `8080`.
+- `--models-dir <MODELS_DIR>`: directory containing local model directories to discover. Defaults to `models`.
+- `--model-id <MODEL_ID>`: public model id returned by `/v1/models`.
+- `--model-dir <MODEL_DIR>`: additional local model directory to register.
+- `--hf-repo <HF_REPO>`: Hugging Face repo id.
+- `--hf-revision <HF_REVISION>`: Hugging Face branch, tag, or commit. Defaults to `main`.
+- `--hf-token <HF_TOKEN>`: Hugging Face token. If omitted, `HF_TOKEN` is used when present.
+- `--hf-cache-dir <HF_CACHE_DIR>`: directory for cached Hugging Face files.
+- `--weights <WEIGHTS>`: safetensors filename inside the model directory for non-layered models. Defaults to `model.safetensors`.
+- `--layered`: load a LayerRun optimized per-layer model directory.
+- `--preload-layers`: load all per-layer weights before serving. Requires `--layered`.
+- `--preload-layer-count <N>`: load only the first `N` per-layer weights before serving. Requires `--layered`.
+- `--debug`: print model execution details during requests.
+- `--log-completions`: print full prompts and generated text for completion requests.
+- `--backend <BACKEND>`: runtime backend, either `cpu` or `mlx`. Defaults to `cpu`.
 
 ## inspect
 
