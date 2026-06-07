@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-fn main() {
-    println!("Hello, world!");
-=======
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use layerrun_core::config::ModelConfig;
@@ -376,5 +372,4 @@ fn resolve_model_dir(
         }
         (None, None) => anyhow::bail!("pass --model-dir/--input-model-dir or --hf-repo"),
     }
->>>>>>> 3df8dd5 (init project)
 }
