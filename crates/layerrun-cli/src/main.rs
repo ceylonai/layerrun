@@ -228,6 +228,11 @@ fn main() -> Result<()> {
             let model = RawLlm::load(&model_dir, &weights)?.with_backend(backend)?;
             let model_load_elapsed = load_started.elapsed();
             eprintln!("using {} backend", model.backend());
+            if debug && model.backend() == BackendKind::Mlx {
+                eprintln!(
+                    "[debug] mlx backend accelerates dense f32 projections; non-f32/quantized tensors use CPU fallback"
+                );
+            }
 
             // This is intentionally a skeleton. Full generation needs tested RoPE/GQA
             // model execution. This proves raw safetensors-level plumbing first.
@@ -302,6 +307,11 @@ fn main() -> Result<()> {
             let mut model = RawLlm::load_layered(&model_dir)?.with_backend(backend)?;
             let model_load_elapsed = load_started.elapsed();
             eprintln!("using {} backend", model.backend());
+            if debug && model.backend() == BackendKind::Mlx {
+                eprintln!(
+                    "[debug] mlx backend accelerates dense f32 projections; non-f32/quantized tensors use CPU fallback"
+                );
+            }
 
             let preload_started = Instant::now();
             if preload_layers || preload_layer_count.is_some() {

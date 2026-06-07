@@ -113,6 +113,24 @@ impl MlxBackend {
 #[cfg(feature = "mlx")]
 impl BackendOps for MlxBackend {
     fn linear_out_in(&self, x: &[f32], weight: &Tensor, bias: Option<&Tensor>) -> Result<Vec<f32>> {
+        if let Some(mut y) = mlx_linear_out_in_f32(x, weight)? {
+            if let Some(bias) = bias {
+                if bias.len() != y.len() {
+                    anyhow::bail!(
+                        "linear_out_in bias mismatch: bias {}, output {}",
+                        bias.len(),
+                        y.len()
+                    );
+                }
+
+                for (index, yi) in y.iter_mut().enumerate() {
+                    *yi += bias.value(index);
+                }
+            }
+
+            return Ok(y);
+        }
+
         self.cpu.linear_out_in(x, weight, bias)
     }
 
@@ -143,6 +161,37 @@ impl BackendOps for MlxBackend {
     fn softmax(&self, x: &[f32]) -> Vec<f32> {
         self.cpu.softmax(x)
     }
+}
+
+#[cfg(feature = "mlx")]
+fn mlx_linear_out_in_f32(x: &[f32], weight: &Tensor) -> Result<Option<Vec<f32>>> {
+    let crate::tensor::TensorData::F32(weight_data) = &weight.data else {
+        return Ok(None);
+    };
+
+    if weight.shape.len() != 2 {
+        anyhow::bail!("linear_out_in weight must be 2D, got {:?}", weight.shape);
+    }
+
+    let out_features = weight.shape[0];
+    let in_features = weight.shape[1];
+    if x.len() != in_features {
+        anyhow::bail!(
+            "linear_out_in mismatch: x len {}, weight shape {:?}",
+            x.len(),
+            weight.shape
+        );
+    }
+
+    let in_features = i32::try_from(in_features)?;
+    let out_features = i32::try_from(out_features)?;
+
+    let x = mlx_rs::Array::from_slice(x, &[1, in_features]);
+    let w = mlx_rs::Array::from_slice(weight_data, &[out_features, in_features]);
+    let y = x.matmul(w.t())?;
+    let y = y.as_slice::<f32>().to_vec();
+
+    Ok(Some(y))
 }
 
 #[cfg(not(feature = "mlx"))]
