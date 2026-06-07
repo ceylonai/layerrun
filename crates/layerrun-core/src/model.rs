@@ -9,6 +9,7 @@ use crate::{
     weights::DecoderLayerWeights,
 };
 use anyhow::Result;
+use rand::random;
 use std::{path::Path, time::Instant};
 
 pub struct RawLlm {
@@ -22,6 +23,31 @@ pub struct RawLlm {
     pub embed_tokens_per_layer: Option<Tensor>,
     pub final_norm: Tensor,
     pub lm_head: Tensor,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SamplingConfig {
+    pub temperature: f32,
+    pub top_k: Option<usize>,
+    pub top_p: f32,
+}
+
+impl SamplingConfig {
+    pub fn greedy() -> Self {
+        Self {
+            temperature: 0.0,
+            top_k: None,
+            top_p: 1.0,
+        }
+    }
+
+    pub fn with_temperature(temperature: f32) -> Self {
+        Self {
+            temperature,
+            top_k: if temperature > 0.0 { Some(40) } else { None },
+            top_p: 1.0,
+        }
+    }
 }
 
 impl RawLlm {
@@ -260,8 +286,53 @@ impl RawLlm {
         max_new_tokens: usize,
         debug: bool,
     ) -> Result<Vec<usize>> {
+        self.generate_with_temperature_with_debug(input_ids, max_new_tokens, 0.0, debug)
+    }
+
+    pub fn generate_with_temperature(
+        &self,
+        input_ids: &[usize],
+        max_new_tokens: usize,
+        temperature: f32,
+    ) -> Result<Vec<usize>> {
+        self.generate_with_sampling_with_debug(
+            input_ids,
+            max_new_tokens,
+            SamplingConfig::with_temperature(temperature),
+            false,
+        )
+    }
+
+    pub fn generate_with_temperature_with_debug(
+        &self,
+        input_ids: &[usize],
+        max_new_tokens: usize,
+        temperature: f32,
+        debug: bool,
+    ) -> Result<Vec<usize>> {
+        self.generate_with_sampling_with_debug(
+            input_ids,
+            max_new_tokens,
+            SamplingConfig::with_temperature(temperature),
+            debug,
+        )
+    }
+
+    pub fn generate_with_sampling_with_debug(
+        &self,
+        input_ids: &[usize],
+        max_new_tokens: usize,
+        sampling: SamplingConfig,
+        debug: bool,
+    ) -> Result<Vec<usize>> {
         if input_ids.is_empty() {
             anyhow::bail!("input_ids is empty");
+        }
+        if sampling.temperature.is_nan() || sampling.temperature.is_sign_negative() {
+            anyhow::bail!("temperature must be a non-negative number");
+        }
+        if sampling.top_p.is_nan() || sampling.top_p <= 0.0 || sampling.top_p > 1.0 {
+            anyhow::bail!("top_p must be greater than 0 and less than or equal to 1");
         }
 
         let mut out = input_ids.to_vec();
@@ -301,14 +372,17 @@ impl RawLlm {
                 }
             }
 
-            let next = argmax(&logits);
+            let next = sample_next_token(&logits, sampling);
             let next_logit = logits[next];
 
             out.push(next);
 
             if debug {
                 eprintln!(
-                    "[debug] next step={step} selected_token={next} selected_logit={next_logit:.6} output_len={} step_ms={:.3}",
+                    "[debug] next step={step} selected_token={next} selected_logit={next_logit:.6} temperature={:.3} top_k={:?} top_p={:.3} output_len={} step_ms={:.3}",
+                    sampling.temperature,
+                    sampling.top_k,
+                    sampling.top_p,
                     out.len(),
                     step_started.elapsed().as_secs_f64() * 1000.0,
                 );
@@ -372,6 +446,62 @@ impl RawLlm {
 
         Ok(Some(row))
     }
+}
+
+fn sample_next_token(logits: &[f32], sampling: SamplingConfig) -> usize {
+    if sampling.temperature <= 0.0 {
+        return argmax(logits);
+    }
+
+    let mut candidates: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    if let Some(top_k) = sampling.top_k {
+        candidates.truncate(top_k.max(1));
+    }
+
+    let max_logit = candidates
+        .iter()
+        .map(|(_, logit)| *logit)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut total = 0.0f32;
+    let mut weighted = Vec::with_capacity(candidates.len());
+
+    for (token_id, logit) in candidates {
+        let weight = ((logit - max_logit) / sampling.temperature).exp();
+        let weight = if weight.is_finite() { weight } else { 0.0 };
+        total += weight;
+        weighted.push((token_id, weight));
+    }
+
+    if total <= 0.0 || !total.is_finite() {
+        return argmax(logits);
+    }
+
+    if sampling.top_p < 1.0 {
+        weighted.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut cumulative = 0.0f32;
+        let mut cutoff_len = weighted.len();
+        for (index, (_, weight)) in weighted.iter().enumerate() {
+            cumulative += *weight;
+            if cumulative / total >= sampling.top_p {
+                cutoff_len = index + 1;
+                break;
+            }
+        }
+        weighted.truncate(cutoff_len.max(1));
+        total = weighted.iter().map(|(_, weight)| *weight).sum();
+    }
+
+    let mut threshold = random::<f32>() * total;
+    for (token_id, weight) in weighted {
+        threshold -= weight;
+        if threshold <= 0.0 {
+            return token_id;
+        }
+    }
+
+    argmax(logits)
 }
 
 pub fn decoder_layer_forward(

@@ -978,6 +978,7 @@ dependencies = [
  "half",
  "memmap2",
  "mlx-rs",
+ "rand",
  "rayon",
  "reqwest",
  "safetensors",

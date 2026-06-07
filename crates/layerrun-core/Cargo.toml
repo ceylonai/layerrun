@@ -13,6 +13,7 @@ half = "2.7.1"
 memmap2 = "0.9.10"
 mlx-rs = { version = "0.25.3", optional = true, default-features = false }
 rayon = "1.12.0"
+rand = "0.9.4"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
 safetensors = "0.7.0"
 serde = "1.0.228"

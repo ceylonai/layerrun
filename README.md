@@ -135,7 +135,9 @@ curl http://127.0.0.1:8080/v1/completions \
   -d '{
     "model": "gemma-4-E4B-it-qat-mobile-transformers",
     "prompt": "Write a short greeting",
-    "max_tokens": 8
+    "max_tokens": 8,
+    "temperature": 0.7,
+    "top_k": 40
   }'
 ```
 
@@ -150,11 +152,15 @@ curl http://127.0.0.1:8080/v1/chat/completions \
       { "role": "system", "content": "You are concise." },
       { "role": "user", "content": "Write a short greeting" }
     ],
-    "max_tokens": 8
+    "max_tokens": 8,
+    "temperature": 0.7,
+    "top_k": 40
   }'
 ```
 
 OpenAI SDK-compatible clients can use `http://127.0.0.1:8080/v1` as the base URL. Streaming responses are not supported yet; send non-streaming requests.
+
+`temperature`, `top_k`, and `top_p` are supported on `/v1/completions` and `/v1/chat/completions`. The default temperature is `0`, which keeps deterministic greedy generation. When `temperature` is above `0`, the server defaults to `top_k: 40` to avoid sampling low-quality tail tokens. You can override it explicitly.
 
 Completion logs are printed to stderr. Every generation request emits live progress lines for request start, model load, tokenization, generation, decoding, and request completion, plus a summary with endpoint, model, token counts, finish reason, and elapsed time. To include the full prompt and generated output in the server log, start the server with:
 
@@ -196,7 +202,7 @@ JavaScript client example:
 node examples/js-client.mjs models
 node examples/js-client.mjs tags
 node examples/js-client.mjs chat gemma-4-E4B-it-qat-mobile-transformers "Write a short greeting"
-LAYERRUN_MODEL=gemma-4-E4B-it-qat-mobile-transformers node examples/js-client.mjs complete "Hello"
+LAYERRUN_MODEL=gemma-4-E4B-it-qat-mobile-transformers LAYERRUN_TEMPERATURE=0.7 LAYERRUN_TOP_K=40 node examples/js-client.mjs complete "Hello"
 ```
 
 Server options:

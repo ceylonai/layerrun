@@ -2,6 +2,15 @@
 
 const baseUrl = process.env.LAYERRUN_BASE_URL ?? "http://127.0.0.1:8080";
 const defaultModel = process.env.LAYERRUN_MODEL;
+const defaultTemperature = process.env.LAYERRUN_TEMPERATURE
+  ? Number(process.env.LAYERRUN_TEMPERATURE)
+  : undefined;
+const defaultTopK = process.env.LAYERRUN_TOP_K
+  ? Number(process.env.LAYERRUN_TOP_K)
+  : undefined;
+const defaultTopP = process.env.LAYERRUN_TOP_P
+  ? Number(process.env.LAYERRUN_TOP_P)
+  : undefined;
 
 const [command = "chat", ...args] = process.argv.slice(2);
 
@@ -16,11 +25,14 @@ function usage() {
 Environment:
   LAYERRUN_BASE_URL   Server URL. Defaults to http://127.0.0.1:8080
   LAYERRUN_MODEL      Default model when <model> is omitted for complete/chat
+  LAYERRUN_TEMPERATURE Sampling temperature. Defaults to server behavior
+  LAYERRUN_TOP_K      Limit sampling to the K most likely tokens
+  LAYERRUN_TOP_P      Nucleus sampling cutoff, from 0 to 1
 
 Examples:
   node examples/js-client.mjs models
   node examples/js-client.mjs chat gemma-4-E4B-it-qat-mobile-transformers "Write a short greeting"
-  LAYERRUN_MODEL=gemma-4-E4B-it-qat-mobile-transformers node examples/js-client.mjs complete "Hello"`);
+  LAYERRUN_MODEL=gemma-4-E4B-it-qat-mobile-transformers LAYERRUN_TEMPERATURE=0.7 LAYERRUN_TOP_K=40 node examples/js-client.mjs complete "Hello"`);
 }
 
 async function request(path, options = {}) {
@@ -59,6 +71,14 @@ function parseModelAndPrompt(args) {
   return { model: args[0], prompt: args.slice(1).join(" ") };
 }
 
+function samplingOptions() {
+  return {
+    ...(defaultTemperature === undefined ? {} : { temperature: defaultTemperature }),
+    ...(defaultTopK === undefined ? {} : { top_k: defaultTopK }),
+    ...(defaultTopP === undefined ? {} : { top_p: defaultTopP }),
+  };
+}
+
 async function main() {
   switch (command) {
     case "models": {
@@ -94,6 +114,7 @@ async function main() {
           model,
           prompt,
           max_tokens: 32,
+          ...samplingOptions(),
         }),
       });
       console.log(body.choices[0]?.text ?? "");
@@ -108,6 +129,7 @@ async function main() {
           model,
           messages: [{ role: "user", content: prompt }],
           max_tokens: 32,
+          ...samplingOptions(),
         }),
       });
       console.log(body.choices[0]?.message?.content ?? "");

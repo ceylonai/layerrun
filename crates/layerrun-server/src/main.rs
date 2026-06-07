@@ -8,7 +8,9 @@ use axum::{
 };
 use clap::Parser;
 use layerrun_core::{
-    backend::BackendKind, huggingface::HuggingFaceSource, model::RawLlm,
+    backend::BackendKind,
+    huggingface::HuggingFaceSource,
+    model::{RawLlm, SamplingConfig},
     tokenizer_wrap::LayerTokenizer,
 };
 use serde::Deserialize;
@@ -265,6 +267,9 @@ struct CompletionRequest {
     prompt: Prompt,
     max_tokens: Option<usize>,
     max_completion_tokens: Option<usize>,
+    temperature: Option<f32>,
+    top_k: Option<usize>,
+    top_p: Option<f32>,
     stream: Option<bool>,
 }
 
@@ -292,8 +297,9 @@ async fn create_completion(
         .max_tokens
         .or(request.max_completion_tokens)
         .unwrap_or(16);
+    let sampling = validate_sampling(request.temperature, request.top_k, request.top_p)?;
 
-    let generated = generate_text(&state, &model_id, &prompt, max_tokens).await?;
+    let generated = generate_text(&state, &model_id, &prompt, max_tokens, sampling).await?;
     log_completion("completion", &model_id, &prompt, &generated, &state);
 
     Ok(Json(json!({
@@ -321,6 +327,9 @@ struct ChatCompletionRequest {
     messages: Vec<ChatMessage>,
     max_tokens: Option<usize>,
     max_completion_tokens: Option<usize>,
+    temperature: Option<f32>,
+    top_k: Option<usize>,
+    top_p: Option<f32>,
     stream: Option<bool>,
 }
 
@@ -362,7 +371,8 @@ async fn create_chat_completion(
         .max_tokens
         .or(request.max_completion_tokens)
         .unwrap_or(16);
-    let generated = generate_text(&state, &model_id, &prompt, max_tokens).await?;
+    let sampling = validate_sampling(request.temperature, request.top_k, request.top_p)?;
+    let generated = generate_text(&state, &model_id, &prompt, max_tokens, sampling).await?;
     log_completion("chat.completion", &model_id, &prompt, &generated, &state);
 
     Ok(Json(json!({
@@ -393,6 +403,7 @@ struct GeneratedText {
     completion_tokens: usize,
     total_tokens: usize,
     finish_reason: &'static str,
+    sampling: SamplingConfig,
     elapsed_ms: f64,
 }
 
@@ -401,6 +412,7 @@ async fn generate_text(
     model_id: &str,
     prompt: &str,
     max_tokens: usize,
+    sampling: SamplingConfig,
 ) -> Result<GeneratedText, ApiError> {
     let state = state.clone();
     let model_id = model_id.to_string();
@@ -409,9 +421,12 @@ async fn generate_text(
     let started = Instant::now();
 
     eprintln!(
-        "[completion:{request_id}] request_start model={} max_tokens={} prompt_chars={}",
+        "[completion:{request_id}] request_start model={} max_tokens={} temperature={:.3} top_k={:?} top_p={:.3} prompt_chars={}",
         model_id,
         max_tokens,
+        sampling.temperature,
+        sampling.top_k,
+        sampling.top_p,
         prompt.chars().count(),
     );
 
@@ -444,12 +459,15 @@ async fn generate_text(
                 .map_err(|_| ApiError::internal(anyhow::anyhow!("model lock poisoned")))?;
             let phase_started = Instant::now();
             eprintln!(
-                "[completion:{request_id}] generation_start prompt_tokens={} max_tokens={}",
+                "[completion:{request_id}] generation_start prompt_tokens={} max_tokens={} temperature={:.3} top_k={:?} top_p={:.3}",
                 input_ids_usize.len(),
                 max_tokens,
+                sampling.temperature,
+                sampling.top_k,
+                sampling.top_p,
             );
             model
-                .generate_greedy_with_debug(&input_ids_usize, max_tokens, state.debug)
+                .generate_with_sampling_with_debug(&input_ids_usize, max_tokens, sampling, state.debug)
                 .map_err(ApiError::internal)
                 .inspect(|output_ids| {
                     eprintln!(
@@ -492,6 +510,7 @@ async fn generate_text(
             } else {
                 "length"
             },
+            sampling,
             elapsed_ms: 0.0,
         })
     })
@@ -514,10 +533,13 @@ fn log_completion(
     state: &AppState,
 ) {
     eprintln!(
-        "[completion:{}] endpoint={} model={} prompt_tokens={} completion_tokens={} total_tokens={} finish_reason={} elapsed_ms={:.3}",
+        "[completion:{}] endpoint={} model={} temperature={:.3} top_k={:?} top_p={:.3} prompt_tokens={} completion_tokens={} total_tokens={} finish_reason={} elapsed_ms={:.3}",
         generated.request_id,
         endpoint,
         model_id,
+        generated.sampling.temperature,
+        generated.sampling.top_k,
+        generated.sampling.top_p,
         generated.prompt_tokens,
         generated.completion_tokens,
         generated.total_tokens,
@@ -564,6 +586,32 @@ fn reject_streaming(stream: Option<bool>) -> Result<(), ApiError> {
         ));
     }
     Ok(())
+}
+
+fn validate_sampling(
+    temperature: Option<f32>,
+    top_k: Option<usize>,
+    top_p: Option<f32>,
+) -> Result<SamplingConfig, ApiError> {
+    let temperature = temperature.unwrap_or(0.0);
+    if temperature.is_nan() || temperature.is_sign_negative() {
+        return Err(ApiError::bad_request(
+            "temperature must be a non-negative number",
+        ));
+    }
+
+    let top_p = top_p.unwrap_or(1.0);
+    if top_p.is_nan() || top_p <= 0.0 || top_p > 1.0 {
+        return Err(ApiError::bad_request(
+            "top_p must be greater than 0 and less than or equal to 1",
+        ));
+    }
+
+    Ok(SamplingConfig {
+        temperature,
+        top_k: top_k.or_else(|| if temperature > 0.0 { Some(40) } else { None }),
+        top_p,
+    })
 }
 
 fn build_catalog(cli: &Cli) -> Result<ModelCatalog> {
