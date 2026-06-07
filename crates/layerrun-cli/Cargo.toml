@@ -5,4 +5,9 @@ edition = "2024"
 
 
 [dependencies]
+<<<<<<< HEAD
+=======
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive"] }
+>>>>>>> 3df8dd5 (init project)
 layerrun-core={path="../layerrun-core"}

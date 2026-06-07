@@ -1,0 +1,15 @@
+[package]
+name = "layerrun-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+half = "2.7.1"
+memmap2 = "0.9.10"
+rayon = "1.12.0"
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
+safetensors = "0.7.0"
+serde = "1.0.228"
+serde_json = "1.0.150"
+tokenizers = "0.23.1"
