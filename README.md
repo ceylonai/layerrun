@@ -85,3 +85,12 @@ The workspace comes with local models under the `models/` directory:
 * `models/llama-3.2-1b-instruct`: Local standard sharded safetensors model.
 * `models/llama-3.2-1b-instruct-layered`: LayerRun optimized per-layer directory.
 * `models/mistral`: Local model files configuration.
+
+---
+
+## License
+
+LayerRun is licensed under the GNU General Public License v3.0.
+
+Copyright (C) 2026 SYIGEN (PRIVATE) LIMITED.
+

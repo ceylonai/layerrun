@@ -1,3 +1,12 @@
+// Copyright (C) 2026 SYIGEN (PRIVATE) LIMITED
+//
+// This file is part of LayerRun.
+//
+// LayerRun is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// any later version.
+
 #[derive(Debug, Clone, Default)]
 pub struct KvCache {
     pub keys: Vec<Vec<f32>>,
