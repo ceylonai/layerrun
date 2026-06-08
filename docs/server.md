@@ -1,19 +1,19 @@
 # LayerRun Server API & Mode Reference
 
-`layerrun-server` is an OpenAI-compatible and Ollama-style HTTP server that hosts models directly from local folders or resolves them from Hugging Face caches on the fly. It supports lazy loading, preloading, parameter-controlled sampling, and automated chat-template formatting.
+LayerRun's `serve` mode is an OpenAI-compatible and Ollama-style HTTP server that hosts models directly from local folders or resolves them from Hugging Face caches on the fly. It supports lazy loading, preloading, parameter-controlled sampling, and automated chat-template formatting.
 
 ## Running the Server
 
-Start the server using the workspace package:
+Start the server through the CLI package:
 
 ```sh
-cargo run -p layerrun-server [options]
+cargo run -p layerrun-cli -- serve [options]
 ```
 
 To run in production-optimized release mode:
 
 ```sh
-cargo run --release -p layerrun-server [options]
+cargo run --release -p layerrun-cli -- serve [options]
 ```
 
 ### Discovery & Registration Examples
@@ -21,24 +21,24 @@ cargo run --release -p layerrun-server [options]
 #### 1. Scan Model Directory (Default)
 By default, the server scans the `models/` directory for subdirectories containing a valid `config.json` and `tokenizer.json` to expose in its catalog.
 ```sh
-cargo run -p layerrun-server
+cargo run -p layerrun-cli -- serve
 ```
 
 #### 2. Scan Custom Directory
 ```sh
-cargo run -p layerrun-server -- --models-dir /path/to/my/models
+cargo run -p layerrun-cli -- serve --models-dir /path/to/my/models
 ```
 
 #### 3. Register Specific Local Single-File Model
 ```sh
-cargo run -p layerrun-server -- \
+cargo run -p layerrun-cli -- serve \
   --model-dir models/qwen \
   --model-id qwen-base
 ```
 
 #### 4. Register Specific LayerRun Optimized Per-Layer Model
 ```sh
-cargo run -p layerrun-server -- \
+cargo run -p layerrun-cli -- serve \
   --model-dir models/qwen-layered \
   --layered \
   --model-id qwen-layered
@@ -46,7 +46,7 @@ cargo run -p layerrun-server -- \
 
 #### 5. Serve directly from Hugging Face (downloads to local cache)
 ```sh
-cargo run -p layerrun-server -- \
+cargo run -p layerrun-cli -- serve \
   --hf-repo meta-llama/Llama-3.2-1B-Instruct \
   --model-id llama-1b
 ```
@@ -57,13 +57,13 @@ cargo run -p layerrun-server -- \
 
 * `--host <HOST>`: IP address to bind (default: `127.0.0.1`).
 * `--port <PORT>`: Port to bind (default: `8080`).
-* `--models-dir <MODELS_DIR>`: Folder containing local models to automatically discover (default: `models`).
+* `--models-dir <MODELS_DIR>`: Folder containing local models to automatically discover. If omitted, uses the models directory saved by `layerrun-cli init`, then `models`.
 * `--model-id <MODEL_ID>`: Public model ID returned by `/v1/models` and used in request payloads.
 * `--model-dir <MODEL_DIR>`: Path to an individual model directory to register.
 * `--hf-repo <HF_REPO>`: Hugging Face repository ID.
 * `--hf-revision <HF_REVISION>`: Hugging Face revision/commit hash (default: `main`).
-* `--hf-token <HF_TOKEN>`: Hugging Face API Token.
-* `--hf-cache-dir <HF_CACHE_DIR>`: Custom Hugging Face cache directory.
+* `--hf-token <HF_TOKEN>`: Hugging Face API Token. If omitted, uses the token saved by `layerrun-cli init`, then `HF_TOKEN` if present.
+* `--hf-cache-dir <HF_CACHE_DIR>`: Custom Hugging Face cache directory. If omitted, uses the cache directory saved by `layerrun-cli init`, then the default cache path.
 * `--weights <WEIGHTS>`: Filename for the weights inside the model directory (default: `model.safetensors`).
 * `--layered`: Loads the model as an optimized per-layer directory structure.
 * `--preload-layers`: Preload all per-layer weight files into memory at startup. *Requires `--layered`*.

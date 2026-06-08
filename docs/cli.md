@@ -16,11 +16,36 @@ To run with optimization enabled (strongly recommended for generation and valida
 cargo run --release -p layerrun-cli -- <command> [options]
 ```
 
+Use `--config <PATH>` before the subcommand to read or write a config file other than the default `$HOME/.layerrun-conf`.
+
 ---
 
 ## Commands
 
-### 1. `inspect`
+### 1. `init`
+
+Creates the local LayerRun config file and models directory. The config stores default paths and an optional Hugging Face token used by later `--hf-repo` commands.
+
+#### Usage
+```sh
+cargo run -p layerrun-cli -- init [options]
+```
+
+#### Options
+* `--models-dir <MODELS_DIR>`: Directory where local LayerRun model directories are stored (default: `models`).
+* `--hf-token <HF_TOKEN>`: Hugging Face token to save. If omitted, the CLI prompts for it.
+* `--hf-cache-dir <HF_CACHE_DIR>`: Directory for cached Hugging Face files.
+
+#### Example
+```sh
+cargo run -p layerrun-cli -- init \
+  --models-dir models \
+  --hf-cache-dir ~/.cache/layerrun/huggingface
+```
+
+---
+
+### 2. `inspect`
 
 Inspects a `.safetensors` file, printing tensor names, data types (dtypes), and shapes.
 
@@ -39,7 +64,7 @@ cargo run -p layerrun-cli -- inspect --file models/qwen/model.safetensors
 
 ---
 
-### 2. `tokenize`
+### 3. `tokenize`
 
 Tokenizes input text using a specified `tokenizer.json` and prints both the token IDs and the decoded text.
 
@@ -61,7 +86,7 @@ cargo run -p layerrun-cli -- tokenize \
 
 ---
 
-### 3. `probe-model`
+### 4. `probe-model`
 
 Loads model configuration and major tensors (embeddings, final norm, LM head) to inspect shape and model type compatibility.
 
@@ -74,8 +99,8 @@ cargo run -p layerrun-cli -- probe-model [options]
 * `--model-dir <MODEL_DIR>`: Path to a local model directory containing `config.json` and weight files. *Required unless `--hf-repo` is set.*
 * `--hf-repo <HF_REPO>`: Hugging Face repository ID (e.g., `meta-llama/Llama-3.2-1B-Instruct`).
 * `--hf-revision <HF_REVISION>`: Hugging Face branch, tag, or commit hash (default: `main`).
-* `--hf-token <HF_TOKEN>`: Hugging Face API token for gated or private repositories. (If omitted, uses the `HF_TOKEN` environment variable if present).
-* `--hf-cache-dir <HF_CACHE_DIR>`: Target directory for caching downloaded Hugging Face files.
+* `--hf-token <HF_TOKEN>`: Hugging Face API token for gated or private repositories. If omitted, uses the token saved by `init`, then `HF_TOKEN` if present.
+* `--hf-cache-dir <HF_CACHE_DIR>`: Target directory for caching downloaded Hugging Face files. If omitted, uses the cache directory saved by `init`, then the default cache path.
 * `--weights <WEIGHTS>`: The name of the safetensors file inside the model directory (default: `model.safetensors`).
 
 > [!WARNING]
@@ -88,7 +113,7 @@ cargo run -p layerrun-cli -- probe-model --model-dir models/qwen
 
 ---
 
-### 4. `generate`
+### 5. `generate`
 
 Executes greedy generation from a single-file or sharded model layout. Useful for testing baseline math and configurations before conversion.
 
@@ -101,8 +126,8 @@ cargo run -p layerrun-cli -- generate [options]
 * `--model-dir <MODEL_DIR>`: Local model directory. *Required unless `--hf-repo` is set.*
 * `--hf-repo <HF_REPO>`: Hugging Face repository ID.
 * `--hf-revision <HF_REVISION>`: Hugging Face revision (default: `main`).
-* `--hf-token <HF_TOKEN>`: Hugging Face API token.
-* `--hf-cache-dir <HF_CACHE_DIR>`: Hugging Face cache directory.
+* `--hf-token <HF_TOKEN>`: Hugging Face API token. If omitted, uses the token saved by `init`, then `HF_TOKEN` if present.
+* `--hf-cache-dir <HF_CACHE_DIR>`: Hugging Face cache directory. If omitted, uses the cache directory saved by `init`, then the default cache path.
 * `--weights <WEIGHTS>`: The name of the safetensors file inside the model directory (default: `model.safetensors`).
 * `--prompt <PROMPT>`: Prompt text to generate from.
 * `--max-new-tokens <MAX_NEW_TOKENS>`: Number of new tokens to generate (default: `8`).
@@ -133,7 +158,7 @@ cargo run -p layerrun-cli -- generate \
 
 ---
 
-### 5. `optimize`
+### 6. `optimize`
 
 Converts a standard model layout into a LayerRun optimized per-layer directory. It separates the model weights into:
 * `embeddings.safetensors`
@@ -151,8 +176,8 @@ cargo run -p layerrun-cli -- optimize [options]
 * `--input-model-dir <INPUT_MODEL_DIR>`: Standard model directory to convert. *Required unless `--hf-repo` is set.*
 * `--hf-repo <HF_REPO>`: Hugging Face repository ID to download and convert.
 * `--hf-revision <HF_REVISION>`: Hugging Face revision (default: `main`).
-* `--hf-token <HF_TOKEN>`: Hugging Face API token.
-* `--hf-cache-dir <HF_CACHE_DIR>`: Hugging Face cache directory.
+* `--hf-token <HF_TOKEN>`: Hugging Face API token. If omitted, uses the token saved by `init`, then `HF_TOKEN` if present.
+* `--hf-cache-dir <HF_CACHE_DIR>`: Hugging Face cache directory. If omitted, uses the cache directory saved by `init`, then the default cache path.
 * `--output-model-dir <OUTPUT_MODEL_DIR>`: Destination directory for the optimized per-layer files.
 * `--weights <WEIGHTS>`: The name of the safetensors file inside the input model directory (default: `model.safetensors`).
 
@@ -165,7 +190,7 @@ cargo run -p layerrun-cli -- optimize \
 
 ---
 
-### 6. `generate-layered`
+### 7. `generate-layered`
 
 Generates text from a LayerRun optimized per-layer model directory. This command supports preloading weights to minimize repeated disk access.
 
@@ -209,7 +234,7 @@ cargo run --release -p layerrun-cli -- generate-layered \
 
 ---
 
-### 7. `serve`
+### 8. `serve`
 
 Starts the OpenAI-compatible and Ollama-style HTTP server from the CLI package.
 
@@ -221,13 +246,13 @@ cargo run --release -p layerrun-cli -- serve [options]
 #### Options
 * `--host <HOST>`: IP address to bind (default: `127.0.0.1`).
 * `--port <PORT>`: Port to bind (default: `8080`).
-* `--models-dir <MODELS_DIR>`: Folder containing local models to automatically discover (default: `models`).
+* `--models-dir <MODELS_DIR>`: Folder containing local models to automatically discover. If omitted, uses the models directory saved by `init`, then `models`.
 * `--model-id <MODEL_ID>`: Public model ID returned by `/v1/models` and used in request payloads.
 * `--model-dir <MODEL_DIR>`: Path to an individual model directory to register.
 * `--hf-repo <HF_REPO>`: Hugging Face repository ID.
 * `--hf-revision <HF_REVISION>`: Hugging Face revision/commit hash.
-* `--hf-token <HF_TOKEN>`: Hugging Face API token.
-* `--hf-cache-dir <HF_CACHE_DIR>`: Custom Hugging Face cache directory.
+* `--hf-token <HF_TOKEN>`: Hugging Face API token. If omitted, uses the token saved by `init`, then `HF_TOKEN` if present.
+* `--hf-cache-dir <HF_CACHE_DIR>`: Custom Hugging Face cache directory. If omitted, uses the cache directory saved by `init`, then the default cache path.
 * `--weights <WEIGHTS>`: Filename for weights inside the model directory (default: `model.safetensors`).
 * `--layered`: Loads the model as an optimized per-layer directory structure.
 * `--preload-layers`: Preload all per-layer weight files before serving.
@@ -258,7 +283,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 ---
 
-### 8. `validate`
+### 9. `validate`
 
 Validates LayerRun's tokenizer outputs, first-token logits, and short greedy generations against a reference JSON fixture generated from a trusted runtime (like Hugging Face Transformers).
 
@@ -304,6 +329,7 @@ cargo run -p layerrun-cli -- validate \
 When downloading repos using `--hf-repo`, files are written to a localized cache directory.
 
 * Default location:
+  * Saved `hf_cache_dir` from `$HOME/.layerrun-conf`, if configured.
   * `$XDG_CACHE_HOME/layerrun/huggingface` (if `$XDG_CACHE_HOME` is set)
   * `$HOME/.cache/layerrun/huggingface` (if `$XDG_CACHE_HOME` is not set)
 * Override the cache directory on any command using the `--hf-cache-dir` flag.

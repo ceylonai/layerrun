@@ -43,17 +43,24 @@ Detailed guides are available in the following documents:
 cargo build --release
 ```
 
-### 2. Run Workspace Tests
+### 2. Initialize Local Config
+```sh
+cargo run -p layerrun-cli -- init --models-dir models
+```
+
+This writes `$HOME/.layerrun-conf`, creates the models directory, and can save a Hugging Face token for later `--hf-repo` commands.
+
+### 3. Run Workspace Tests
 ```sh
 cargo test
 ```
 
-### 3. Run the CLI Help
+### 4. Run the CLI Help
 ```sh
 cargo run -p layerrun-cli -- --help
 ```
 
-### 4. Build with MLX Acceleration
+### 5. Build with MLX Acceleration
 ```sh
 cargo build -p layerrun-cli --features mlx
 ```
@@ -62,9 +69,9 @@ cargo build -p layerrun-cli --features mlx
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ```
 
-### 5. Launch the Server
+### 6. Launch the Server
 ```sh
-cargo run --release -p layerrun-server
+cargo run --release -p layerrun-cli -- serve
 ```
 
 ---

@@ -7,19 +7,43 @@ use layerrun_core::model::{RawLlm, SamplingConfig};
 use layerrun_core::safetensor_loader::SafeTensorFile;
 use layerrun_core::tokenizer_wrap::LayerTokenizer;
 use layerrun_server::ServeConfig;
-use serde::Deserialize;
-use std::{fs, io::Write, path::Path, path::PathBuf, time::Instant};
+use serde::{Deserialize, Serialize};
+use std::{
+    env, fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "layerrun_raw")]
 #[command(about = "Raw safetensors-level LLM runtime skeleton without Candle")]
 struct Cli {
+    /// Path to the LayerRun config file.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Create the local LayerRun config and models directory.
+    Init {
+        /// Directory where local LayerRun model directories are stored.
+        #[arg(long, default_value = "models")]
+        models_dir: PathBuf,
+
+        /// Hugging Face token to save. If omitted, the CLI prompts for it.
+        #[arg(long)]
+        hf_token: Option<String>,
+
+        /// Directory for cached Hugging Face files.
+        #[arg(long)]
+        hf_cache_dir: Option<PathBuf>,
+    },
+
     /// Inspect tensor names, dtypes, and shapes from a .safetensors file.
     Inspect {
         #[arg(long)]
@@ -49,11 +73,11 @@ enum Commands {
         #[arg(long)]
         hf_revision: Option<String>,
 
-        /// Hugging Face token. If omitted, HF_TOKEN is used when present.
+        /// Hugging Face token. If omitted, saved config then HF_TOKEN are used.
         #[arg(long)]
         hf_token: Option<String>,
 
-        /// Directory for cached Hugging Face files.
+        /// Directory for cached Hugging Face files. If omitted, saved config then defaults are used.
         #[arg(long)]
         hf_cache_dir: Option<PathBuf>,
 
@@ -76,11 +100,11 @@ enum Commands {
         #[arg(long)]
         hf_revision: Option<String>,
 
-        /// Hugging Face token. If omitted, HF_TOKEN is used when present.
+        /// Hugging Face token. If omitted, saved config then HF_TOKEN are used.
         #[arg(long)]
         hf_token: Option<String>,
 
-        /// Directory for cached Hugging Face files.
+        /// Directory for cached Hugging Face files. If omitted, saved config then defaults are used.
         #[arg(long)]
         hf_cache_dir: Option<PathBuf>,
 
@@ -120,11 +144,11 @@ enum Commands {
         #[arg(long)]
         hf_revision: Option<String>,
 
-        /// Hugging Face token. If omitted, HF_TOKEN is used when present.
+        /// Hugging Face token. If omitted, saved config then HF_TOKEN are used.
         #[arg(long)]
         hf_token: Option<String>,
 
-        /// Directory for cached Hugging Face files.
+        /// Directory for cached Hugging Face files. If omitted, saved config then defaults are used.
         #[arg(long)]
         hf_cache_dir: Option<PathBuf>,
 
@@ -200,8 +224,8 @@ enum Commands {
         port: u16,
 
         /// Directory containing local model directories to serve.
-        #[arg(long, default_value = "models")]
-        models_dir: String,
+        #[arg(long)]
+        models_dir: Option<String>,
 
         /// Public model id returned by /v1/models and accepted in requests.
         #[arg(long)]
@@ -219,11 +243,11 @@ enum Commands {
         #[arg(long)]
         hf_revision: Option<String>,
 
-        /// Hugging Face token. If omitted, HF_TOKEN is used when present.
+        /// Hugging Face token. If omitted, saved config then HF_TOKEN are used.
         #[arg(long)]
         hf_token: Option<String>,
 
-        /// Directory for cached Hugging Face files.
+        /// Directory for cached Hugging Face files. If omitted, saved config then defaults are used.
         #[arg(long)]
         hf_cache_dir: Option<PathBuf>,
 
@@ -257,11 +281,118 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct LayerRunConfig {
+    models_dir: Option<PathBuf>,
+    hf_token: Option<String>,
+    hf_cache_dir: Option<PathBuf>,
+}
+
+impl LayerRunConfig {
+    fn load_optional(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config {}", path.display()))?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse config {}", path.display()))
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create config dir {}", parent.display()))?;
+        }
+
+        let text = serde_json::to_string_pretty(self)?;
+        fs::write(path, format!("{text}\n"))
+            .with_context(|| format!("failed to write config {}", path.display()))?;
+        set_private_permissions(path)?;
+        Ok(())
+    }
+}
+
+fn config_path(config: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(config) = config {
+        return Ok(config);
+    }
+
+    let home = env::var_os("HOME").context("HOME is not set; pass --config")?;
+    Ok(Path::new(&home).join(".layerrun-conf"))
+}
+
+fn prompt_hf_token() -> Result<Option<String>> {
+    eprint!("Hugging Face token (leave blank to skip): ");
+    io::stderr().flush()?;
+
+    let mut token = String::new();
+    io::stdin()
+        .read_line(&mut token)
+        .context("failed to read Hugging Face token")?;
+    let token = token.trim().to_string();
+
+    if token.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(token))
+    }
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = fs::Permissions::from_mode(0o600);
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to set private permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let config_path = config_path(cli.config)?;
+    let saved_config = match &cli.command {
+        Commands::Init { .. } => LayerRunConfig::default(),
+        _ => LayerRunConfig::load_optional(&config_path)?,
+    };
 
     match cli.command {
+        Commands::Init {
+            models_dir,
+            hf_token,
+            hf_cache_dir,
+        } => {
+            let hf_token = match hf_token {
+                Some(token) => Some(token),
+                None => prompt_hf_token()?,
+            };
+            let config = LayerRunConfig {
+                models_dir: Some(models_dir.clone()),
+                hf_token,
+                hf_cache_dir: hf_cache_dir.clone(),
+            };
+            fs::create_dir_all(&models_dir)
+                .with_context(|| format!("failed to create models dir {}", models_dir.display()))?;
+            if let Some(hf_cache_dir) = &hf_cache_dir {
+                fs::create_dir_all(hf_cache_dir).with_context(|| {
+                    format!("failed to create HF cache dir {}", hf_cache_dir.display())
+                })?;
+            }
+            config.save(&config_path)?;
+            println!("created models dir: {}", models_dir.display());
+            if let Some(hf_cache_dir) = &config.hf_cache_dir {
+                println!("created HF cache dir: {}", hf_cache_dir.display());
+            }
+            println!("wrote config: {}", config_path.display());
+        }
+
         Commands::Inspect { file } => {
             let st = SafeTensorFile::open(file)?;
             st.print_summary()?;
@@ -288,6 +419,7 @@ async fn main() -> Result<()> {
                 hf_revision,
                 hf_token,
                 hf_cache_dir,
+                &saved_config,
                 &weights,
             )?;
             let model = RawLlm::load(&model_dir, &weights)?;
@@ -321,6 +453,7 @@ async fn main() -> Result<()> {
                 hf_revision,
                 hf_token,
                 hf_cache_dir,
+                &saved_config,
                 &weights,
             )?;
             let tok = LayerTokenizer::from_file(format!("{model_dir}/tokenizer.json"))?;
@@ -374,6 +507,7 @@ async fn main() -> Result<()> {
                 hf_revision,
                 hf_token,
                 hf_cache_dir,
+                &saved_config,
                 &weights,
             )?;
             let cfg = ModelConfig::from_model_dir(&input_model_dir)?;
@@ -496,6 +630,14 @@ async fn main() -> Result<()> {
             debug,
             log_completions,
         } => {
+            let models_dir = models_dir
+                .or_else(|| {
+                    saved_config
+                        .models_dir
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                })
+                .unwrap_or_else(|| "models".to_string());
             layerrun_server::serve(ServeConfig {
                 host,
                 port,
@@ -504,8 +646,8 @@ async fn main() -> Result<()> {
                 model_dir,
                 hf_repo,
                 hf_revision,
-                hf_token,
-                hf_cache_dir,
+                hf_token: hf_token.or_else(|| saved_config.hf_token.clone()),
+                hf_cache_dir: hf_cache_dir.or_else(|| saved_config.hf_cache_dir.clone()),
                 weights,
                 layered,
                 preload_layers,
@@ -888,11 +1030,14 @@ fn resolve_model_dir(
     hf_revision: Option<String>,
     hf_token: Option<String>,
     hf_cache_dir: Option<PathBuf>,
+    config: &LayerRunConfig,
     weights_filename: &str,
 ) -> Result<String> {
     match (model_dir, hf_repo) {
         (Some(model_dir), None) => Ok(model_dir),
         (None, Some(hf_repo)) => {
+            let hf_token = hf_token.or_else(|| config.hf_token.clone());
+            let hf_cache_dir = hf_cache_dir.or_else(|| config.hf_cache_dir.clone());
             let source = HuggingFaceSource::new(hf_repo)?
                 .with_revision(hf_revision)
                 .with_token(hf_token)
