@@ -45,7 +45,7 @@ jobs:
           rustup default stable
 
       - name: Build release binaries
-        run: cargo build --release --locked -p layerrun-cli -p layerrun-server
+        run: cargo build --release --locked -p layerrun-cli
 
       - name: Package Unix binaries
         if: matrix.archive == 'tar.gz'
@@ -53,7 +53,6 @@ jobs:
         run: |
           mkdir -p dist/package
           cp target/release/layerrun-cli dist/package/
-          cp target/release/layerrun-server dist/package/
           cp README.md dist/package/
           cp LICENSE* dist/package/ 2>/dev/null || true
           tar -czf "dist/layerrun-${{ matrix.name }}.tar.gz" -C dist/package .
@@ -64,7 +63,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist/package | Out-Null
           Copy-Item target/release/layerrun-cli.exe dist/package/
-          Copy-Item target/release/layerrun-server.exe dist/package/
           Copy-Item README.md dist/package/
           Get-ChildItem LICENSE* -ErrorAction SilentlyContinue | Copy-Item -Destination dist/package/
           Compress-Archive -Path dist/package/* -DestinationPath "dist/layerrun-${{ matrix.name }}.zip"
