@@ -22,6 +22,7 @@ Detailed guides are available in the following documents:
 
 * 📖 **[CLI Reference Guide](file:///Users/dewmal/Projects/layer_run/docs/cli.md)**: How to run inspections, tokenize text, generate text, convert checkpoints, and run validation.
 * 🖥️ **[Server API Guide](file:///Users/dewmal/Projects/layer_run/docs/server.md)**: Endpoints reference, sampling options, model-specific chat templates, and integration examples.
+* 🐳 **[Docker Usage Guide](file:///Users/dewmal/Projects/layer_run/docs/docker.md)**: Build the image, run with Docker or Compose, and verify the server.
 * 📐 **[Architecture Overview](file:///Users/dewmal/Projects/layer_run/ARCHITECTURE.md)**: Deep dive into the workspace crates, tensor representation, CPU/MLX math kernels, and data flow.
 * 🎯 **[Stabilization & Features Plan](file:///Users/dewmal/Projects/layer_run/PLAN.md)**: Current roadmap, correctness validation strategy, and upcoming feature enhancements.
 

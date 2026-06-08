@@ -1,0 +1,6 @@
+target
+models
+.git
+.github
+.DS_Store
+deploy
