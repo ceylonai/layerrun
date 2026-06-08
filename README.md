@@ -1,8 +1,12 @@
 # LayerRun
 
+![LayerRun Logo](docs/layerunlogo.png)
+
 LayerRun is a Rust workspace designed for experimenting with raw `safetensors`-level Large Language Model (LLM) loading, custom tokenizer plumbing, model probing, greedy/sampled text generation, and optimization into a per-layer model layout.
 
 Unlike high-level inference frameworks, LayerRun implements model execution, tensor deserialization, attention logic, and server interfaces directly from scratch.
+
+![LayerRun Architecture Infographic](docs/infographic-p.png)
 
 ---
 
